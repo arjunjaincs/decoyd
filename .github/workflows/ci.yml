@@ -121,8 +121,8 @@ jobs:
       - name: Run gosec
         # -severity medium: skip informational findings.
         # -confidence medium: skip low-confidence noise.
-        # -exclude G304: variable file path in deploy/deploy.go — intentional
-        #   (we write tokens to user-chosen paths; that is the feature).
-        # -exclude G107: url provided to HTTP request as taint in alert/alert.go
-        #   — intentional (webhook URLs come from user config, not untrusted input).
-        run: gosec -severity medium -confidence medium -exclude G304 -exclude G107 ./...
+        # -exclude G107: HTTP URL from user config in alert/alert.go — intentional
+        #   (webhook URLs come from the operator's own config, not untrusted input).
+        #   G304 (file path via variable) is suppressed inline with #nosec comments
+        #   at each site, documenting why each path is safe.
+        run: gosec -severity medium -confidence medium -exclude G107 ./...

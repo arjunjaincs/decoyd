@@ -119,7 +119,7 @@ const configFileName = "alert_config.json"
 // Returns an empty AlertConfig (not an error) when the file does not exist yet.
 func Load(dataDir string) (AlertConfig, error) {
 	path := filepath.Join(dataDir, configFileName)
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // G304: path is always filepath.Join(dataDir, configFileName) — not user-controlled
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return AlertConfig{}, nil
@@ -144,7 +144,7 @@ func Save(dataDir string, cfg AlertConfig) error {
 	path := filepath.Join(dataDir, configFileName)
 	tmp := path + ".tmp"
 
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	if err := os.WriteFile(tmp, data, 0o600); err != nil { //nolint:gosec // G304: tmp is always filepath.Join(dataDir, configFileName)+".tmp" — not user-controlled
 		return fmt.Errorf("write alert config: %w", err)
 	}
 	if runtime.GOOS != "windows" {
