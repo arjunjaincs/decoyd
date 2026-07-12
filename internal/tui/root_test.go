@@ -208,3 +208,53 @@ func TestRootModel_GenScreenDoneReturnsToMenu(t *testing.T) {
 		t.Errorf("GenScreenDoneMsg → screen %v; want ScreenMainMenu", root.current)
 	}
 }
+
+// TestRootModel_DeployScreenNavigation verifies that selecting menu item 1
+// transitions to the Deploy screen.
+func TestRootModel_DeployScreenNavigation(t *testing.T) {
+	m := newTestRoot(false)
+	updated, _ := m.Update(MenuActionMsg{Index: 1})
+	root := updated.(RootModel)
+	if root.current != ScreenDeploy {
+		t.Errorf("MenuActionMsg{1} → screen %v; want ScreenDeploy", root.current)
+	}
+}
+
+// TestRootModel_DeployScreenDoneReturnsToMenu verifies DeployScreenDoneMsg
+// navigates back to main menu.
+func TestRootModel_DeployScreenDoneReturnsToMenu(t *testing.T) {
+	m := newTestRoot(false)
+	updated, _ := m.Update(MenuActionMsg{Index: 1})
+	root := updated.(RootModel)
+
+	updated, _ = root.Update(DeployScreenDoneMsg{})
+	root = updated.(RootModel)
+	if root.current != ScreenMainMenu {
+		t.Errorf("DeployScreenDoneMsg → screen %v; want ScreenMainMenu", root.current)
+	}
+}
+
+// TestRootModel_TokenListNavigation verifies that selecting menu item 2
+// transitions to the Token List screen.
+func TestRootModel_TokenListNavigation(t *testing.T) {
+	m := newTestRoot(false)
+	updated, _ := m.Update(MenuActionMsg{Index: 2})
+	root := updated.(RootModel)
+	if root.current != ScreenTokenList {
+		t.Errorf("MenuActionMsg{2} → screen %v; want ScreenTokenList", root.current)
+	}
+}
+
+// TestRootModel_TokenListDoneReturnsToMenu verifies TokenListDoneMsg returns
+// to the main menu.
+func TestRootModel_TokenListDoneReturnsToMenu(t *testing.T) {
+	m := newTestRoot(false)
+	updated, _ := m.Update(MenuActionMsg{Index: 2})
+	root := updated.(RootModel)
+
+	updated, _ = root.Update(TokenListDoneMsg{})
+	root = updated.(RootModel)
+	if root.current != ScreenMainMenu {
+		t.Errorf("TokenListDoneMsg → screen %v; want ScreenMainMenu", root.current)
+	}
+}

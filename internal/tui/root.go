@@ -15,10 +15,12 @@ import (
 type Screen int
 
 const (
-	ScreenSplash   Screen = iota // First-run welcome
-	ScreenMainMenu               // Main navigation menu
-	ScreenGenerate               // Phase 1: generate a token
-	// Future screens (Phases 2–5) will be added here.
+	ScreenSplash    Screen = iota // First-run welcome
+	ScreenMainMenu                // Main navigation menu
+	ScreenGenerate                // Phase 1: generate a token
+	ScreenDeploy                  // Phase 2: deploy a token to disk
+	ScreenTokenList               // Phase 2: list / manage tokens
+	// Future screens (Phases 3–5) will be added here.
 )
 
 // ----------------------------------------------------------------------------
@@ -32,10 +34,12 @@ type RootModel struct {
 	current Screen
 
 	// sub-models
-	splash   SplashModel
-	mainMenu MainMenuModel
-	generate GenerateModel
-	help     HelpModel
+	splash    SplashModel
+	mainMenu  MainMenuModel
+	generate  GenerateModel
+	deploy    DeployModel
+	tokenList TokenListModel
+	help      HelpModel
 
 	// showHelp is true when the help overlay is active.
 	showHelp bool
@@ -59,14 +63,16 @@ func NewRootModel(isFirstRun bool, width, height int, st *store.Store) RootModel
 	}
 
 	return RootModel{
-		current:  screen,
-		splash:   NewSplashModel(width, height),
-		mainMenu: NewMainMenuModel(width, height),
-		generate: NewGenerateModel(width, height, st),
-		help:     NewHelpModel(width, height),
-		width:    width,
-		height:   height,
-		st:       st,
+		current:   screen,
+		splash:    NewSplashModel(width, height),
+		mainMenu:  NewMainMenuModel(width, height),
+		generate:  NewGenerateModel(width, height, st),
+		deploy:    NewDeployModel(width, height, st),
+		tokenList: NewTokenListModel(width, height, st),
+		help:      NewHelpModel(width, height),
+		width:     width,
+		height:    height,
+		st:        st,
 	}
 }
 
@@ -79,6 +85,10 @@ func (m RootModel) Init() tea.Cmd {
 		return m.mainMenu.Init()
 	case ScreenGenerate:
 		return m.generate.Init()
+	case ScreenDeploy:
+		return m.deploy.Init()
+	case ScreenTokenList:
+		return m.tokenList.Init()
 	}
 	return nil
 }
@@ -95,6 +105,8 @@ func (m RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.splash = propagateSize(m.splash, msg)
 		m.mainMenu = propagateSize(m.mainMenu, msg)
 		m.generate = propagateSize(m.generate, msg)
+		m.deploy = propagateSize(m.deploy, msg)
+		m.tokenList = propagateSize(m.tokenList, msg)
 		m.help = propagateSize(m.help, msg)
 		return m, nil
 
@@ -133,14 +145,32 @@ func (m RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.generate = NewGenerateModel(m.width, m.height, m.st)
 			m.current = ScreenGenerate
 			return m, m.generate.Init()
+		case 1: // Deploy existing decoys
+			m.deploy = NewDeployModel(m.width, m.height, m.st)
+			m.current = ScreenDeploy
+			return m, m.deploy.Init()
+		case 2: // Token list / Alert settings (repurposed as list for Phase 2)
+			m.tokenList = NewTokenListModel(m.width, m.height, m.st)
+			m.current = ScreenTokenList
+			return m, m.tokenList.Init()
 		case 4: // Quit
 			return m, tea.Quit
-		// Indices 1–3 will be routed to Phase 2–4 screens; no-op for now.
+		// Index 3 (Status) will be routed in Phase 4.
 		}
 		return m, nil
 
 	// ── Generate screen done ─────────────────────────────────────────────────
 	case GenScreenDoneMsg:
+		m.current = ScreenMainMenu
+		return m, m.mainMenu.Init()
+
+	// ── Deploy screen done ───────────────────────────────────────────────────
+	case DeployScreenDoneMsg:
+		m.current = ScreenMainMenu
+		return m, m.mainMenu.Init()
+
+	// ── Token list done ──────────────────────────────────────────────────────
+	case TokenListDoneMsg:
 		m.current = ScreenMainMenu
 		return m, m.mainMenu.Init()
 
@@ -173,6 +203,16 @@ func (m RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		newGen, cmd := m.generate.Update(msg)
 		m.generate = newGen.(GenerateModel)
 		return m, cmd
+
+	case ScreenDeploy:
+		newDeploy, cmd := m.deploy.Update(msg)
+		m.deploy = newDeploy.(DeployModel)
+		return m, cmd
+
+	case ScreenTokenList:
+		newList, cmd := m.tokenList.Update(msg)
+		m.tokenList = newList.(TokenListModel)
+		return m, cmd
 	}
 
 	return m, nil
@@ -194,6 +234,10 @@ func (m RootModel) View() string {
 		base = m.mainMenu.View()
 	case ScreenGenerate:
 		base = m.generate.View()
+	case ScreenDeploy:
+		base = m.deploy.View()
+	case ScreenTokenList:
+		base = m.tokenList.View()
 	default:
 		base = ""
 	}

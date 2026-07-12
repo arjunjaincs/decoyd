@@ -47,6 +47,25 @@ First launch shows a splash screen → press any key → main menu.
 4. `Enter` to generate — tokens are saved to the local database instantly
 5. Any key to return to the main menu
 
+**Deploy a decoy**
+1. Select **2. Deploy existing decoys**
+2. Pick a token from your generated list
+3. Pick a destination (Home, Downloads, Desktop, `~/.ssh`, or a custom path)
+4. Press `d` on the confirmation screen for a **dry-run** preview, or `Enter` to write
+5. The deployed path is recorded — visible in the token list
+
+**View / manage tokens**
+- Select **3. Alert settings** (shows token list in Phase 2)
+- `d` to delete a record (deployed file stays on disk)
+
+**CLI (for scripting)**
+
+```sh
+decoyd list             # tab-aligned table of all tokens
+decoyd remove <id>      # delete a token record (file NOT removed from disk)
+decoyd help
+```
+
 **Keybindings (global)**
 
 | Key | Action |
@@ -84,7 +103,7 @@ The embedded database (`decoyd.db`) lives here. No server, no cloud, no account.
 |---|---|
 | 0 — Foundation (TUI shell, theme, splash, menu, CI) | ✅ Complete |
 | 1 — Token generation (8 types, local storage) | ✅ Complete |
-| 2 — Deployment (write to disk, token list screen) | 🔜 Planned |
+| 2 — Deployment (write to disk, token list, CLI subcommands) | ✅ Complete |
 | 3 — Alerting (Discord, Slack, Telegram, ntfy, …) | 🔜 Planned |
 | 4 — Detection engine (file watcher, dashboard) | 🔜 Planned |
 | 5 — Polish (onboarding wizard, multi-profile) | 🔜 Planned |
