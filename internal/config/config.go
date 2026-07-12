@@ -62,7 +62,7 @@ func IsFirstRun(dir string) (bool, error) {
 // run at least once. Subsequent calls to IsFirstRun will return false.
 func MarkInitialized(dir string) error {
 	sentinel := filepath.Join(dir, sentinelFile)
-	f, err := os.OpenFile(sentinel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600) //nolint:gosec // G304: path is always filepath.Join(dataDir, sentinelFile) — not user-controlled
+	f, err := os.OpenFile(sentinel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600) // #nosec G304 -- path is always filepath.Join(dataDir, sentinelFile), never user input
 	if err != nil {
 		return err
 	}
