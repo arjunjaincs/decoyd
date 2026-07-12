@@ -153,9 +153,13 @@ func (m GenerateModel) updateChecklist(msg tea.KeyMsg) (GenerateModel, tea.Cmd) 
 }
 
 // updateNotesInput handles text input when the label field is focused.
+// IMPORTANT: do NOT add single-letter shortcut cases here — they would
+// eat characters during a paste (each pasted char arrives as a KeyMsg).
+// Use only non-printable keys (up-arrow, esc, enter, ctrl+*, backspace)
+// for navigation / control.
 func (m GenerateModel) updateNotesInput(msg tea.KeyMsg) (GenerateModel, tea.Cmd) {
 	switch msg.String() {
-	case "up", "k":
+	case "up": // arrow key only — not "k" (rune, must go to buffer)
 		m.cursor = notesIdx - 1 // move back into token list
 	case "esc":
 		m.cursor = 0
