@@ -23,3 +23,7 @@ Thumbs.db
 
 # Config / data directory (never commit user data)
 .decoyd/
+
+# Internal docs (not for public repo)
+spec.md
+PROGRESS.md
