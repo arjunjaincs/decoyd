@@ -7,6 +7,7 @@ import (
 	"github.com/arjunjaincs/decoyd/internal/store"
 )
 
+
 // ----------------------------------------------------------------------------
 // Screen enum
 // ----------------------------------------------------------------------------
@@ -15,12 +16,13 @@ import (
 type Screen int
 
 const (
-	ScreenSplash    Screen = iota // First-run welcome
-	ScreenMainMenu                // Main navigation menu
-	ScreenGenerate                // Phase 1: generate a token
-	ScreenDeploy                  // Phase 2: deploy a token to disk
-	ScreenTokenList               // Phase 2: list / manage tokens
-	// Future screens (Phases 3–5) will be added here.
+	ScreenSplash        Screen = iota // First-run welcome
+	ScreenMainMenu                    // Main navigation menu
+	ScreenGenerate                    // Phase 1: generate a token
+	ScreenDeploy                      // Phase 2: deploy a token to disk
+	ScreenTokenList                   // Phase 2: list / manage tokens
+	ScreenAlertSettings               // Phase 3: alert channel configuration
+	// Future screens (Phase 4–5) will be added here.
 )
 
 // ----------------------------------------------------------------------------
@@ -34,12 +36,13 @@ type RootModel struct {
 	current Screen
 
 	// sub-models
-	splash    SplashModel
-	mainMenu  MainMenuModel
-	generate  GenerateModel
-	deploy    DeployModel
-	tokenList TokenListModel
-	help      HelpModel
+	splash      SplashModel
+	mainMenu    MainMenuModel
+	generate    GenerateModel
+	deploy      DeployModel
+	tokenList   TokenListModel
+	alertScreen AlertModel
+	help        HelpModel
 
 	// showHelp is true when the help overlay is active.
 	showHelp bool
@@ -50,29 +53,36 @@ type RootModel struct {
 
 	// st is the open token store, shared with sub-models that need persistence.
 	st *store.Store
+
+	// dataDir is the OS-specific data directory, passed to the alert screen
+	// so it can Load/Save alert_config.json.
+	dataDir string
 }
 
 // NewRootModel creates the root model.
 // isFirstRun controls whether to start on the splash screen (true) or the
-// main menu (false).  st must be an open store (may be nil in tests that do
-// not exercise the generate screen).
-func NewRootModel(isFirstRun bool, width, height int, st *store.Store) RootModel {
+// main menu (false). st must be an open store (may be nil in tests that do
+// not exercise the generate screen). dataDir is the OS data directory used
+// by the alert screen to persist alert_config.json.
+func NewRootModel(isFirstRun bool, width, height int, st *store.Store, dataDir string) RootModel {
 	screen := ScreenMainMenu
 	if isFirstRun {
 		screen = ScreenSplash
 	}
 
 	return RootModel{
-		current:   screen,
-		splash:    NewSplashModel(width, height),
-		mainMenu:  NewMainMenuModel(width, height),
-		generate:  NewGenerateModel(width, height, st),
-		deploy:    NewDeployModel(width, height, st),
-		tokenList: NewTokenListModel(width, height, st),
-		help:      NewHelpModel(width, height),
-		width:     width,
-		height:    height,
-		st:        st,
+		current:     screen,
+		splash:      NewSplashModel(width, height),
+		mainMenu:    NewMainMenuModel(width, height),
+		generate:    NewGenerateModel(width, height, st),
+		deploy:      NewDeployModel(width, height, st),
+		tokenList:   NewTokenListModel(width, height, st),
+		alertScreen: NewAlertModel(width, height, dataDir),
+		help:        NewHelpModel(width, height),
+		width:       width,
+		height:      height,
+		st:          st,
+		dataDir:     dataDir,
 	}
 }
 
@@ -107,6 +117,7 @@ func (m RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.generate = propagateSize(m.generate, msg)
 		m.deploy = propagateSize(m.deploy, msg)
 		m.tokenList = propagateSize(m.tokenList, msg)
+		m.alertScreen = propagateSize(m.alertScreen, msg)
 		m.help = propagateSize(m.help, msg)
 		return m, nil
 
@@ -149,10 +160,10 @@ func (m RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.deploy = NewDeployModel(m.width, m.height, m.st)
 			m.current = ScreenDeploy
 			return m, m.deploy.Init()
-		case 2: // Token list / Alert settings (repurposed as list for Phase 2)
-			m.tokenList = NewTokenListModel(m.width, m.height, m.st)
-			m.current = ScreenTokenList
-			return m, m.tokenList.Init()
+		case 2: // Alert settings (Phase 3)
+			m.alertScreen = NewAlertModel(m.width, m.height, m.dataDir)
+			m.current = ScreenAlertSettings
+			return m, m.alertScreen.Init()
 		case 4: // Quit
 			return m, tea.Quit
 		// Index 3 (Status) will be routed in Phase 4.
@@ -171,6 +182,11 @@ func (m RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// ── Token list done ──────────────────────────────────────────────────────
 	case TokenListDoneMsg:
+		m.current = ScreenMainMenu
+		return m, m.mainMenu.Init()
+
+	// ── Alert settings done ───────────────────────────────────────────────────
+	case AlertScreenDoneMsg:
 		m.current = ScreenMainMenu
 		return m, m.mainMenu.Init()
 
@@ -213,6 +229,11 @@ func (m RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		newList, cmd := m.tokenList.Update(msg)
 		m.tokenList = newList.(TokenListModel)
 		return m, cmd
+
+	case ScreenAlertSettings:
+		newAlert, cmd := m.alertScreen.Update(msg)
+		m.alertScreen = newAlert.(AlertModel)
+		return m, cmd
 	}
 
 	return m, nil
@@ -238,6 +259,8 @@ func (m RootModel) View() string {
 		base = m.deploy.View()
 	case ScreenTokenList:
 		base = m.tokenList.View()
+	case ScreenAlertSettings:
+		base = m.alertScreen.View()
 	default:
 		base = ""
 	}

@@ -13,7 +13,7 @@ const testHeight = 24
 // newTestRoot creates a RootModel with a nil store — safe for all tests that
 // do not exercise the Generate screen's save path.
 func newTestRoot(isFirstRun bool) RootModel {
-	return NewRootModel(isFirstRun, testWidth, testHeight, nil)
+	return NewRootModel(isFirstRun, testWidth, testHeight, nil, "")
 }
 
 // TestRootModel_NoPanic verifies that NewRootModel does not panic under either
@@ -153,7 +153,7 @@ func TestRootModel_ViewNoPanic(t *testing.T) {
 // TestRootModel_NarrowTerminal verifies that a sub-MinTermWidth terminal shows
 // the narrow-terminal message instead of broken boxes.
 func TestRootModel_NarrowTerminal(t *testing.T) {
-	m := NewRootModel(false, 40, testHeight, nil) // 40 < MinTermWidth (60)
+	m := NewRootModel(false, 40, testHeight, nil, "") // 40 < MinTermWidth (60)
 	view := m.View()
 
 	// The view should contain the narrow-terminal warning, not the normal UI.
@@ -234,26 +234,37 @@ func TestRootModel_DeployScreenDoneReturnsToMenu(t *testing.T) {
 	}
 }
 
-// TestRootModel_TokenListNavigation verifies that selecting menu item 2
-// transitions to the Token List screen.
-func TestRootModel_TokenListNavigation(t *testing.T) {
+// TestRootModel_AlertSettingsNavigation verifies that selecting menu item 2
+// (Alert settings) transitions to ScreenAlertSettings.
+func TestRootModel_AlertSettingsNavigation(t *testing.T) {
 	m := newTestRoot(false)
 	updated, _ := m.Update(MenuActionMsg{Index: 2})
 	root := updated.(RootModel)
-	if root.current != ScreenTokenList {
-		t.Errorf("MenuActionMsg{2} → screen %v; want ScreenTokenList", root.current)
+	if root.current != ScreenAlertSettings {
+		t.Errorf("MenuActionMsg{2} → screen %v; want ScreenAlertSettings", root.current)
 	}
 }
 
-// TestRootModel_TokenListDoneReturnsToMenu verifies TokenListDoneMsg returns
-// to the main menu.
-func TestRootModel_TokenListDoneReturnsToMenu(t *testing.T) {
+// TestRootModel_AlertScreenDoneReturnsToMenu verifies AlertScreenDoneMsg
+// transitions back to the main menu.
+func TestRootModel_AlertScreenDoneReturnsToMenu(t *testing.T) {
 	m := newTestRoot(false)
 	updated, _ := m.Update(MenuActionMsg{Index: 2})
 	root := updated.(RootModel)
 
-	updated, _ = root.Update(TokenListDoneMsg{})
+	updated, _ = root.Update(AlertScreenDoneMsg{})
 	root = updated.(RootModel)
+	if root.current != ScreenMainMenu {
+		t.Errorf("AlertScreenDoneMsg → screen %v; want ScreenMainMenu", root.current)
+	}
+}
+
+// TestRootModel_TokenListDoneReturnsToMenu verifies TokenListDoneMsg still
+// returns to the main menu when issued from any screen.
+func TestRootModel_TokenListDoneReturnsToMenu(t *testing.T) {
+	m := newTestRoot(false)
+	updated, _ := m.Update(TokenListDoneMsg{})
+	root := updated.(RootModel)
 	if root.current != ScreenMainMenu {
 		t.Errorf("TokenListDoneMsg → screen %v; want ScreenMainMenu", root.current)
 	}

@@ -25,5 +25,5 @@ Thumbs.db
 .decoyd/
 
 # Internal docs (not for public repo)
-spec.md
+DECOYD_SPEC.md
 PROGRESS.md
