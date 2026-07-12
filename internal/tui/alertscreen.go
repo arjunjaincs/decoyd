@@ -309,11 +309,18 @@ func (m AlertModel) updateForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// ── Keys that always work regardless of focused field ─────────────────
 	switch km.String() {
 	case "esc":
+		// Auto-save whatever is in the text fields before leaving the screen.
+		m.autosaveCredentials()
 		return m, func() tea.Msg { return AlertScreenDoneMsg{} }
 
 	case "tab":
 		max := m.maxFieldCursor()
 		if m.fieldCursor < max {
+			// Auto-save when leaving a text field so credentials are persisted
+			// even if the user never fires a test-send (e.g. while offline).
+			if m.fieldCursor == alertFieldPrimary || m.fieldCursor == alertFieldSecondary {
+				m.autosaveCredentials()
+			}
 			m.fieldCursor++
 			if m.fieldCursor == alertFieldSecondary && !m.hasSecondaryField() {
 				m.fieldCursor++
@@ -323,6 +330,10 @@ func (m AlertModel) updateForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case "shift+tab":
 		if m.fieldCursor > 0 {
+			// Same auto-save when tabbing backwards out of a text field.
+			if m.fieldCursor == alertFieldPrimary || m.fieldCursor == alertFieldSecondary {
+				m.autosaveCredentials()
+			}
 			m.fieldCursor--
 			if m.fieldCursor == alertFieldSecondary && !m.hasSecondaryField() {
 				m.fieldCursor--
@@ -337,7 +348,8 @@ func (m AlertModel) updateForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.fieldCursor == alertFieldPrimary || m.fieldCursor == alertFieldSecondary {
 		switch km.String() {
 		case "enter":
-			// Enter advances to the next field (quality-of-life shortcut).
+			// Enter advances to the next field. Auto-save on the way out.
+			m.autosaveCredentials()
 			next := m.fieldCursor + 1
 			if next == alertFieldSecondary && !m.hasSecondaryField() {
 				next++
@@ -401,6 +413,32 @@ func (m AlertModel) updateDone(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Any key: reset to form (keeps entered values intact).
 	m.state = alertStateForm
 	return m, nil
+}
+
+// autosaveCredentials persists the current form fields to savedChannels and
+// disk without firing a test-send. Called on Tab/Enter/Esc so the user's
+// credentials survive navigation even if they never trigger a test.
+//
+// Guards:
+//   - primaryBuf must be non-empty after trim (skip empty forms)
+//   - No network call is made here
+func (m *AlertModel) autosaveCredentials() {
+	primary := strings.TrimSpace(string(m.primaryBuf))
+	if primary == "" {
+		return // nothing worth saving
+	}
+	cfg := m.buildChannelConfig()
+	if m.savedChannels == nil {
+		m.savedChannels = make(map[string]alert.ChannelConfig)
+	}
+	m.savedChannels[cfg.Type] = cfg
+	if m.dataDir != "" {
+		alertCfg := alert.AlertConfig{
+			Channels:     []alert.ChannelConfig{cfg},
+			DefaultIndex: 0,
+		}
+		_ = alert.Save(m.dataDir, alertCfg)
+	}
 }
 
 // doTestSend validates the form and fires an async test-send.

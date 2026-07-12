@@ -616,6 +616,43 @@ All 91 tests pass.
 
 ---
 
+#### Alert Settings: save-vs-test-send audit + autosave fix (`internal/tui/alertscreen.go`)
+
+**Question:** Does the credential save happen only on a _successful_ send, or unconditionally?
+
+**Exact answer from code review:**
+
+The `savedChannels` write in `doTestSend` (line 449) happens **after `alert.NewAlerter(cfg)` succeeds but before the HTTP goroutine is dispatched** (line 460). `NewAlerter` is a pure constructor — no network call. So:
+
+| Scenario | Saved? |
+|---|---|
+| Empty URL | ❌ early-return before save |
+| Missing `https://` | ❌ early-return before save |
+| `NewAlerter` structural error | ❌ early-return before save |
+| Valid URL, **network offline** | ✅ saved to memory + disk, then async send fails |
+| Valid URL, **wrong webhook path** | ✅ saved to memory + disk, then async send fails |
+| Valid URL, **send succeeds** | ✅ saved to memory + disk |
+
+So network failures do NOT block the save. However there was still a real friction: **the only path to saving was pressing Send test alert.** A user who configures credentials and navigates away (without firing a test) would lose their URL.
+
+**Fix — `autosaveCredentials()` pointer method:**
+
+Saves `primaryBuf`/`secondaryBuf` to `savedChannels` + disk whenever the user navigates _out of_ a text field, with no network call:
+
+```
+Tab from text field   → autosaveCredentials() → advance cursor
+Shift+Tab from field  → autosaveCredentials() → retreat cursor
+Enter in text field   → autosaveCredentials() → advance cursor
+Esc (leave screen)    → autosaveCredentials() → emit AlertScreenDoneMsg
+```
+
+Guard: if `primaryBuf` is empty after trim, skip (no point saving a blank config).
+
+**Result:** Credentials are persisted to disk as soon as the user Tabs or Enters out of the URL field — no test-send required. Phase 4 multi-channel assignment can assume any channel that shows a field value is already saved.
+
+
+---
+
 ## Next: Phase 4 — Detection Engine
 
 The background watcher (`internal/watch`), dashboard screen, and alert quality features (debounce, rate limiting, quiet hours). The most technically complex phase — budget extra slack.
