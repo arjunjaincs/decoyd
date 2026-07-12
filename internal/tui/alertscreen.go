@@ -63,9 +63,16 @@ type AlertModel struct {
 	// channel selector
 	channelIdx int // index into alert.Channels
 
+	// savedChannels caches the last-used ChannelConfig for each channel type
+	// within this session. Populated from disk at startup and updated after
+	// every successful test-send. Used by loadChannelFields to restore the
+	// correct credentials when the user cycles back to a previously configured
+	// channel type, instead of showing a blank field.
+	savedChannels map[string]alert.ChannelConfig
+
 	// text input buffers (same []rune + cursor pattern as deployscreen.go)
-	primaryBuf  []rune
-	primaryPos  int
+	primaryBuf   []rune
+	primaryPos   int
 	secondaryBuf []rune
 	secondaryPos int
 
@@ -102,42 +109,68 @@ func tickAlertSpin() tea.Cmd {
 // config file exists.
 func NewAlertModel(width, height int, dataDir string) AlertModel {
 	m := AlertModel{
-		width:   width,
-		height:  height,
-		dataDir: dataDir,
+		width:         width,
+		height:        height,
+		dataDir:       dataDir,
+		savedChannels: make(map[string]alert.ChannelConfig),
 	}
 	// Pre-populate from saved config if available.
+	// All saved channel configs are loaded into the in-memory cache so that
+	// cycling between channel types within a session always restores the
+	// correct credentials for each type.
 	cfg, err := alert.Load(dataDir)
-	if err == nil && len(cfg.Channels) > 0 {
-		ch := cfg.Channels[cfg.DefaultIndex]
-		// Find channel index by type.
-		for i, c := range alert.Channels {
-			if c.Type == ch.Type {
-				m.channelIdx = i
-				break
-			}
+	if err == nil {
+		for _, ch := range cfg.Channels {
+			m.savedChannels[ch.Type] = ch
 		}
-		switch ch.Type {
-		case alert.ChannelTelegram:
-			m.primaryBuf = []rune(ch.BotToken)
-			m.primaryPos = len(m.primaryBuf)
-			m.secondaryBuf = []rune(ch.ChatID)
-			m.secondaryPos = len(m.secondaryBuf)
-		case alert.ChannelNtfy:
-			srv := ch.ServerURL
-			if srv == "" {
-				srv = "https://ntfy.sh"
+		if len(cfg.Channels) > 0 {
+			ch := cfg.Channels[cfg.DefaultIndex]
+			for i, c := range alert.Channels {
+				if c.Type == ch.Type {
+					m.channelIdx = i
+					break
+				}
 			}
-			m.primaryBuf = []rune(srv)
-			m.primaryPos = len(m.primaryBuf)
-			m.secondaryBuf = []rune(ch.Topic)
-			m.secondaryPos = len(m.secondaryBuf)
-		default:
-			m.primaryBuf = []rune(ch.WebhookURL)
-			m.primaryPos = len(m.primaryBuf)
+			m.loadChannelFields()
 		}
 	}
 	return m
+}
+
+// loadChannelFields sets primaryBuf/secondaryBuf from the savedChannels cache
+// for the currently selected channel type.
+// If no saved config exists for that type, the fields are cleared so the user
+// sees an empty form (not stale credentials from a previously visited channel).
+func (m *AlertModel) loadChannelFields() {
+	ch, ok := m.savedChannels[m.channelType()]
+	if !ok {
+		m.primaryBuf = nil
+		m.primaryPos = 0
+		m.secondaryBuf = nil
+		m.secondaryPos = 0
+		return
+	}
+	m.secondaryBuf = nil
+	m.secondaryPos = 0
+	switch ch.Type {
+	case alert.ChannelTelegram:
+		m.primaryBuf = []rune(ch.BotToken)
+		m.primaryPos = len(m.primaryBuf)
+		m.secondaryBuf = []rune(ch.ChatID)
+		m.secondaryPos = len(m.secondaryBuf)
+	case alert.ChannelNtfy:
+		srv := ch.ServerURL
+		if srv == "" {
+			srv = "https://ntfy.sh"
+		}
+		m.primaryBuf = []rune(srv)
+		m.primaryPos = len(m.primaryBuf)
+		m.secondaryBuf = []rune(ch.Topic)
+		m.secondaryPos = len(m.secondaryBuf)
+	default:
+		m.primaryBuf = []rune(ch.WebhookURL)
+		m.primaryPos = len(m.primaryBuf)
+	}
 }
 
 // SetSize satisfies the Sizable interface used by propagateSize.
@@ -344,12 +377,10 @@ func (m AlertModel) updateForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case "enter":
 		switch m.fieldCursor {
 		case alertFieldChannel:
-			// Cycle forward through channel types and reset field buffers.
+			// Cycle forward through channel types and restore saved credentials
+			// for the new type (empty form if never configured in this session).
 			m.channelIdx = (m.channelIdx + 1) % len(alert.Channels)
-			m.primaryBuf = nil
-			m.primaryPos = 0
-			m.secondaryBuf = nil
-			m.secondaryPos = 0
+			m.loadChannelFields()
 		case alertFieldSend:
 			return m.doTestSend()
 		}
@@ -411,7 +442,13 @@ func (m AlertModel) doTestSend() (AlertModel, tea.Cmd) {
 		return m, nil
 	}
 
-	// Save the config before sending so it persists even if the send fails.
+	// Cache this channel's config so cycling back to it restores credentials.
+	if m.savedChannels == nil {
+		m.savedChannels = make(map[string]alert.ChannelConfig)
+	}
+	m.savedChannels[cfg.Type] = cfg
+
+	// Persist to disk so the config survives a restart.
 	if m.dataDir != "" {
 		alertCfg := alert.AlertConfig{
 			Channels:     []alert.ChannelConfig{cfg},

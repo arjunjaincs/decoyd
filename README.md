@@ -66,7 +66,9 @@ Credential fields are masked (`••••last4`) when unfocused so secrets don
 If the URL or token is missing or malformed, a clear error is shown before any network request is made.
 
 **View / manage tokens**
-- Select **4. View tokens** from the main menu (Phase 4 dashboard — coming soon)
+- Select **4. View tokens** from the main menu
+- `↑/↓` or `j/k` to browse, `d` to delete (with confirm step), `e` to edit the Notes label inline, `esc` to go back
+- The deployed file is NOT removed from disk on delete (by design — the physical canary stays in place)
 - CLI fallback: `decoyd list`
 
 **CLI (for scripting)**

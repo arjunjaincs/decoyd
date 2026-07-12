@@ -27,6 +27,7 @@ type tokenListState int
 const (
 	tokenListStateBrowse  tokenListState = iota // browsing the list
 	tokenListStateConfDel                       // confirming a delete
+	tokenListStateEdit                          // editing the Notes field of the selected token
 )
 
 // ----------------------------------------------------------------------------
@@ -42,6 +43,9 @@ type TokenListModel struct {
 	cursor int
 	state  tokenListState
 	notice string // brief status line shown below the table
+	// Edit state — holds the in-progress rune buffer for the Notes field.
+	editBuf []rune
+	editPos int
 }
 
 // NewTokenListModel creates a fresh model, loading all tokens from the store.
@@ -79,6 +83,8 @@ func (m TokenListModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateBrowse(msg)
 		case tokenListStateConfDel:
 			return m.updateConfirmDelete(msg)
+		case tokenListStateEdit:
+			return m.updateEdit(msg)
 		}
 	}
 	return m, nil
@@ -99,11 +105,19 @@ func (m TokenListModel) updateBrowse(msg tea.KeyMsg) (TokenListModel, tea.Cmd) {
 		if len(m.all) > 0 {
 			m.state = tokenListStateConfDel
 		}
+	case "e":
+		if len(m.all) > 0 {
+			// Pre-populate edit buffer with the current Notes value.
+			m.editBuf = []rune(m.all[m.cursor].Notes)
+			m.editPos = len(m.editBuf)
+			m.state = tokenListStateEdit
+		}
 	case "esc":
 		return m, func() tea.Msg { return TokenListDoneMsg{} }
 	}
 	return m, nil
 }
+
 
 func (m TokenListModel) updateConfirmDelete(msg tea.KeyMsg) (TokenListModel, tea.Cmd) {
 	switch msg.String() {
@@ -131,6 +145,71 @@ func (m TokenListModel) updateConfirmDelete(msg tea.KeyMsg) (TokenListModel, tea
 	return m, nil
 }
 
+// updateEdit handles key input while editing the Notes field.
+// IMPORTANT: only non-printable keys (enter, esc, backspace, ctrl+*, arrows)
+// are used for control — no single-letter shortcuts — so paste works correctly.
+func (m TokenListModel) updateEdit(msg tea.KeyMsg) (TokenListModel, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.editBuf = nil
+		m.editPos = 0
+		m.state = tokenListStateBrowse
+	case "enter":
+		if len(m.all) == 0 {
+			m.state = tokenListStateBrowse
+			return m, nil
+		}
+		tok := m.all[m.cursor]
+		tok.Notes = strings.TrimSpace(string(m.editBuf))
+		var err error
+		if m.st != nil {
+			err = m.st.UpdateToken(tok)
+		}
+		m.editBuf = nil
+		m.editPos = 0
+		if err != nil {
+			m.notice = ErrorStyle.Render("Edit failed: " + err.Error())
+		} else {
+			m.notice = lipgloss.NewStyle().Foreground(ColorPrimary).Render(
+				fmt.Sprintf("Notes updated for %s", tok.ID))
+		}
+		m.reload()
+		m.state = tokenListStateBrowse
+	case "backspace", "ctrl+h":
+		if m.editPos > 0 {
+			m.editBuf = append(m.editBuf[:m.editPos-1], m.editBuf[m.editPos:]...)
+			m.editPos--
+		}
+	case "delete":
+		if m.editPos < len(m.editBuf) {
+			m.editBuf = append(m.editBuf[:m.editPos], m.editBuf[m.editPos+1:]...)
+		}
+	case "left", "ctrl+b":
+		if m.editPos > 0 {
+			m.editPos--
+		}
+	case "right", "ctrl+f":
+		if m.editPos < len(m.editBuf) {
+			m.editPos++
+		}
+	case "ctrl+a", "home":
+		m.editPos = 0
+	case "ctrl+e", "end":
+		m.editPos = len(m.editBuf)
+	default:
+		if len(msg.Runes) > 0 {
+			r := msg.Runes
+			nb := make([]rune, 0, len(m.editBuf)+len(r))
+			nb = append(nb, m.editBuf[:m.editPos]...)
+			nb = append(nb, r...)
+			nb = append(nb, m.editBuf[m.editPos:]...)
+			m.editBuf = nb
+			m.editPos += len(r)
+		}
+	}
+	return m, nil
+}
+
 // ----------------------------------------------------------------------------
 // View
 // ----------------------------------------------------------------------------
@@ -147,6 +226,9 @@ func (m TokenListModel) View() string {
 
 	if m.state == tokenListStateConfDel && len(m.all) > 0 {
 		return m.viewConfirmDelete(boxW)
+	}
+	if m.state == tokenListStateEdit && len(m.all) > 0 {
+		return m.viewEdit(boxW)
 	}
 
 	return m.viewTable(boxW)
@@ -229,7 +311,7 @@ func (m TokenListModel) viewTable(boxW int) string {
 	}
 
 	box := renderBoxInner("Deployed Tokens", sb.String(), boxW, ColorBorder)
-	footer := HelpTextStyle.Render("↑/↓ browse   d delete   esc back   ? help")
+	footer := HelpTextStyle.Render("↑/↓ browse   d delete   e edit notes   esc back")
 	return lipgloss.JoinVertical(lipgloss.Left, box, footer)
 }
 
@@ -247,6 +329,34 @@ func (m TokenListModel) viewConfirmDelete(boxW int) string {
 	content := strings.TrimRight(sb.String(), "\n")
 	box := renderBoxInner("Delete Token", content, boxW, ColorDanger)
 	footer := HelpTextStyle.Render("y/enter confirm   n/esc cancel")
+	return lipgloss.JoinVertical(lipgloss.Left, box, footer)
+}
+
+func (m TokenListModel) viewEdit(boxW int) string {
+	tok := m.all[m.cursor]
+
+	// Render edit buffer with block cursor at insertion point.
+	var editDisplay string
+	if len(m.editBuf) == 0 {
+		editDisplay = lipgloss.NewStyle().Foreground(ColorTextMuted).Render("│")
+	} else {
+		before := string(m.editBuf[:m.editPos])
+		cur := lipgloss.NewStyle().Background(ColorPrimary).Foreground(ColorBackground).Render(" ")
+		after := ""
+		if m.editPos < len(m.editBuf) {
+			after = string(m.editBuf[m.editPos:])
+		}
+		editDisplay = before + cur + after
+	}
+
+	var sb strings.Builder
+	sb.WriteString(MutedStyle.Render("  ID:    ") + NormalItemStyle.Render(tok.ID) + "\n")
+	sb.WriteString(MutedStyle.Render("  Type:  ") + NormalItemStyle.Render(tok.Type) + "\n\n")
+	sb.WriteString(MutedStyle.Render("  Notes: ") + SelectedItemStyle().Render(editDisplay) + "\n")
+
+	content := strings.TrimRight(sb.String(), "\n")
+	box := renderBoxInner("Edit Token Notes", content, boxW, ColorPrimary)
+	footer := HelpTextStyle.Render("enter save   esc cancel")
 	return lipgloss.JoinVertical(lipgloss.Left, box, footer)
 }
 
