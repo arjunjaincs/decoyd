@@ -17,6 +17,10 @@ import (
 	"github.com/arjunjaincs/decoyd/internal/tokens"
 )
 
+// sshKeySentinel separates the private-key PEM from the public-key line in
+// an SSH token's Value field — matches what GenerateSSHKey() produces.
+const sshKeySentinel = "---PUBLIC KEY---\n"
+
 // ErrAlreadyExists is returned when the target path already exists.
 // The caller should ask the user to confirm before removing and retrying.
 var ErrAlreadyExists = errors.New("file already exists at target path")
@@ -38,10 +42,11 @@ func PermForType(tokenType string) os.FileMode {
 
 // DeployResult carries the outcome of a single deploy operation.
 type DeployResult struct {
-	Token       tokens.Token
-	DeployedTo  string // absolute path of the written file
-	DryRun      bool   // true ⇒ nothing was written, result is a preview
-	WouldCreate bool   // only meaningful when DryRun == true
+	Token        tokens.Token
+	DeployedTo   string // absolute path of the primary written file
+	ExtraFiles   []string // additional files written (e.g. id_ed25519.pub)
+	DryRun       bool   // true ⇒ nothing was written, result is a preview
+	WouldCreate  bool   // only meaningful when DryRun == true
 }
 
 // Options controls how DeployToFile behaves.
@@ -52,13 +57,21 @@ type Options struct {
 
 // DeployToFile writes t.Value to filepath.Join(targetDir, t.Filename).
 //
-//   - Returns ErrAlreadyExists without writing if the target file already exists
-//     (even in dry-run mode the check is performed).
-//   - Sets permission bits via PermForType.
-//   - Returns a DeployResult describing what happened (or would happen in dry-run).
+// Special case: TypeSSHKey tokens contain both a private key and a public key
+// separated by sshKeySentinel. DeployToFile automatically writes:
+//   - id_ed25519      (private key, 0600)
+//   - id_ed25519.pub  (public key,  0644)
+//
+// Returns ErrAlreadyExists without writing if either target file already exists
+// (even in dry-run mode the check is performed).
 func DeployToFile(t tokens.Token, targetDir string, opts Options) (DeployResult, error) {
 	if targetDir == "" {
 		return DeployResult{}, errors.New("deploy: targetDir must not be empty")
+	}
+
+	// SSH keys get special two-file handling.
+	if t.Type == tokens.TypeSSHKey {
+		return deploySSHKeyPair(t, targetDir, opts)
 	}
 
 	// Resolve the absolute target path.
@@ -92,20 +105,79 @@ func DeployToFile(t tokens.Token, targetDir string, opts Options) (DeployResult,
 	}
 
 	perm := PermForType(t.Type)
-	if err := os.WriteFile(dest, []byte(t.Value), perm); err != nil {
-		return DeployResult{}, fmt.Errorf("deploy: write file: %w", err)
-	}
-
-	// On Windows, file permissions aren't enforced the same way; chmod is a
-	// no-op there but we call it anyway for portability.
-	if runtime.GOOS != "windows" {
-		if err := os.Chmod(dest, perm); err != nil {
-			// Non-fatal — log via the returned result.
-			_ = err
-		}
+	if err := writeFile(dest, t.Value, perm); err != nil {
+		return DeployResult{}, err
 	}
 
 	return res, nil
+}
+
+// deploySSHKeyPair handles the special case of an SSH token: it splits the
+// Value on sshKeySentinel and writes id_ed25519 (private, 0600) and
+// id_ed25519.pub (public, 0644) as a pair.
+func deploySSHKeyPair(t tokens.Token, targetDir string, opts Options) (DeployResult, error) {
+	parts := strings.SplitN(t.Value, sshKeySentinel, 2)
+	if len(parts) != 2 {
+		return DeployResult{}, errors.New("deploy: malformed SSH token value (missing sentinel)")
+	}
+	privPEM := parts[0]
+	pubLine := parts[1]
+
+	absDir, err := filepath.Abs(targetDir)
+	if err != nil {
+		return DeployResult{}, fmt.Errorf("deploy: resolve path: %w", err)
+	}
+	privDest := filepath.Join(absDir, "id_ed25519")
+	pubDest := filepath.Join(absDir, "id_ed25519.pub")
+
+	// Check both targets before writing anything.
+	for _, dest := range []string{privDest, pubDest} {
+		if _, err := os.Stat(dest); err == nil {
+			return DeployResult{}, fmt.Errorf("%w: %s", ErrAlreadyExists, dest)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return DeployResult{}, fmt.Errorf("deploy: stat target: %w", err)
+		}
+	}
+
+	res := DeployResult{
+		Token:       t,
+		DeployedTo:  privDest,
+		ExtraFiles:  []string{pubDest},
+	}
+
+	if opts.DryRun {
+		res.DryRun = true
+		res.WouldCreate = true
+		return res, nil
+	}
+
+	if err := os.MkdirAll(absDir, 0o750); err != nil {
+		return DeployResult{}, fmt.Errorf("deploy: create directory: %w", err)
+	}
+
+	// Write private key (0600).
+	if err := writeFile(privDest, privPEM, 0o600); err != nil {
+		return DeployResult{}, err
+	}
+	// Write public key (0644).
+	if err := writeFile(pubDest, pubLine, 0o644); err != nil {
+		// Roll back the private key so we don't leave a partial deploy.
+		_ = os.Remove(privDest)
+		return DeployResult{}, err
+	}
+
+	return res, nil
+}
+
+// writeFile writes content to dest with the given permissions.
+func writeFile(dest, content string, perm os.FileMode) error {
+	if err := os.WriteFile(dest, []byte(content), perm); err != nil {
+		return fmt.Errorf("deploy: write %s: %w", dest, err)
+	}
+	if runtime.GOOS != "windows" {
+		_ = os.Chmod(dest, perm)
+	}
+	return nil
 }
 
 // PresetDirs returns platform-appropriate preset destination directories.

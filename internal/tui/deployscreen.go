@@ -248,9 +248,18 @@ func (m DeployModel) doDeploy(dryRun bool) (DeployModel, tea.Cmd) {
 	}
 
 	if dryRun {
-		m.result = fmt.Sprintf("[DRY RUN] Would write:\n  %s\n  Permissions: %04o\n  Nothing was written.", res.DeployedTo, deploy.PermForType(tok.Type))
+		msg := fmt.Sprintf("[DRY RUN] Would write:\n  %s (perm %04o)", res.DeployedTo, deploy.PermForType(tok.Type))
+		for _, extra := range res.ExtraFiles {
+			msg += fmt.Sprintf("\n  %s (perm 0644)", extra)
+		}
+		msg += "\n  Nothing was written."
+		m.result = msg
 	} else {
-		m.result = fmt.Sprintf("✓ Deployed!\n  %s\n  Permissions: %04o", res.DeployedTo, deploy.PermForType(tok.Type))
+		msg := fmt.Sprintf("✓ Deployed!\n  %s (perm %04o)", res.DeployedTo, deploy.PermForType(tok.Type))
+		for _, extra := range res.ExtraFiles {
+			msg += fmt.Sprintf("\n  %s (perm 0644)", extra)
+		}
+		m.result = msg
 	}
 	m.resultErr = false
 	m.state = deployStateDone

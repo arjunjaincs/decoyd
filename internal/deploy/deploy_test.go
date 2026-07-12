@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -228,6 +229,99 @@ func TestSanitizePath_TildeExpansion(t *testing.T) {
 				t.Errorf("got %q; want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// ── SSH keypair deploy ───────────────────────────────────────────────────────
+
+func TestDeployToFile_SSHKey_WritesBothFiles(t *testing.T) {
+	dir := t.TempDir()
+	tok, err := tokens.GenerateSSHKey()
+	if err != nil {
+		t.Fatalf("GenerateSSHKey() error: %v", err)
+	}
+
+	res, err := deploy.DeployToFile(tok, dir, deploy.Options{})
+	if err != nil {
+		t.Fatalf("DeployToFile(SSH) error: %v", err)
+	}
+
+	// Primary path must be id_ed25519.
+	if !strings.HasSuffix(res.DeployedTo, "id_ed25519") {
+		t.Errorf("DeployedTo = %q; want suffix id_ed25519", res.DeployedTo)
+	}
+	// ExtraFiles must contain id_ed25519.pub.
+	if len(res.ExtraFiles) != 1 || !strings.HasSuffix(res.ExtraFiles[0], "id_ed25519.pub") {
+		t.Errorf("ExtraFiles = %v; want one entry ending in id_ed25519.pub", res.ExtraFiles)
+	}
+
+	// Both files must exist on disk.
+	for _, path := range append([]string{res.DeployedTo}, res.ExtraFiles...) {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("expected file %s: %v", path, err)
+		}
+	}
+
+	// Private key must start with PEM header.
+	privData, _ := os.ReadFile(res.DeployedTo)
+	if !strings.HasPrefix(string(privData), "-----BEGIN OPENSSH PRIVATE KEY-----") {
+		t.Errorf("private key content does not start with PEM header")
+	}
+
+	// Public key line must start with ssh-ed25519.
+	pubData, _ := os.ReadFile(res.ExtraFiles[0])
+	if !strings.HasPrefix(string(pubData), "ssh-ed25519 ") {
+		t.Errorf("public key content = %q; want prefix ssh-ed25519", string(pubData))
+	}
+}
+
+func TestDeployToFile_SSHKey_PrivPerms(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("permission bits not enforced on Windows")
+	}
+	dir := t.TempDir()
+	tok, _ := tokens.GenerateSSHKey()
+	res, err := deploy.DeployToFile(tok, dir, deploy.Options{})
+	if err != nil {
+		t.Fatalf("deploy error: %v", err)
+	}
+	info, _ := os.Stat(res.DeployedTo)
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("id_ed25519 perm = %04o; want 0600", got)
+	}
+}
+
+func TestDeployToFile_SSHKey_PubPerms(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("permission bits not enforced on Windows")
+	}
+	dir := t.TempDir()
+	tok, _ := tokens.GenerateSSHKey()
+	res, err := deploy.DeployToFile(tok, dir, deploy.Options{})
+	if err != nil {
+		t.Fatalf("deploy error: %v", err)
+	}
+	info, _ := os.Stat(res.ExtraFiles[0])
+	if got := info.Mode().Perm(); got != 0o644 {
+		t.Errorf("id_ed25519.pub perm = %04o; want 0644", got)
+	}
+}
+
+func TestDeployToFile_SSHKey_DryRun(t *testing.T) {
+	dir := t.TempDir()
+	tok, _ := tokens.GenerateSSHKey()
+	res, err := deploy.DeployToFile(tok, dir, deploy.Options{DryRun: true})
+	if err != nil {
+		t.Fatalf("dry-run error: %v", err)
+	}
+	if !res.DryRun || !res.WouldCreate {
+		t.Error("DryRun result flags not set")
+	}
+	// Neither file should exist.
+	for _, p := range append([]string{res.DeployedTo}, res.ExtraFiles...) {
+		if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("DryRun must not create %s", p)
+		}
 	}
 }
 
