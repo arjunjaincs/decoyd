@@ -1,0 +1,25 @@
+# Binaries
+decoyd
+decoyd.exe
+*.exe
+
+# Go build artifacts
+*.o
+*.a
+*.so
+
+# Test output
+*.test
+coverage.out
+coverage.html
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Config / data directory (never commit user data)
+.decoyd/
