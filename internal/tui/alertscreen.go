@@ -273,21 +273,67 @@ func (m AlertModel) updateForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// ── Keys that always work regardless of focused field ─────────────────
 	switch km.String() {
 	case "esc":
 		return m, func() tea.Msg { return AlertScreenDoneMsg{} }
 
-	case "tab", "down", "j":
+	case "tab":
 		max := m.maxFieldCursor()
 		if m.fieldCursor < max {
 			m.fieldCursor++
-			// Skip secondary if channel doesn't use it.
+			if m.fieldCursor == alertFieldSecondary && !m.hasSecondaryField() {
+				m.fieldCursor++
+			}
+		}
+		return m, nil
+
+	case "shift+tab":
+		if m.fieldCursor > 0 {
+			m.fieldCursor--
+			if m.fieldCursor == alertFieldSecondary && !m.hasSecondaryField() {
+				m.fieldCursor--
+			}
+		}
+		return m, nil
+	}
+
+	// ── Text input fields: all other keys go into the buffer ──────────────
+	// Do NOT check j/k/s/down/up shortcuts here — those characters appear
+	// in URLs and tokens and would be eaten during a paste operation.
+	if m.fieldCursor == alertFieldPrimary || m.fieldCursor == alertFieldSecondary {
+		switch km.String() {
+		case "enter":
+			// Enter advances to the next field (quality-of-life shortcut).
+			next := m.fieldCursor + 1
+			if next == alertFieldSecondary && !m.hasSecondaryField() {
+				next++
+			}
+			if next <= m.maxFieldCursor() {
+				m.fieldCursor = next
+			}
+		default:
+			if m.fieldCursor == alertFieldPrimary {
+				m.primaryBuf, m.primaryPos = handleTextInput(m.primaryBuf, m.primaryPos, km)
+			} else {
+				m.secondaryBuf, m.secondaryPos = handleTextInput(m.secondaryBuf, m.secondaryPos, km)
+			}
+		}
+		return m, nil
+	}
+
+	// ── Non-text rows (Channel selector, Send button) ─────────────────────
+	switch km.String() {
+	case "down", "j":
+		max := m.maxFieldCursor()
+		if m.fieldCursor < max {
+			m.fieldCursor++
 			if m.fieldCursor == alertFieldSecondary && !m.hasSecondaryField() {
 				m.fieldCursor++
 			}
 		}
 
-	case "shift+tab", "up", "k":
+	case "up", "k":
 		if m.fieldCursor > 0 {
 			m.fieldCursor--
 			if m.fieldCursor == alertFieldSecondary && !m.hasSecondaryField() {
@@ -298,9 +344,8 @@ func (m AlertModel) updateForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case "enter":
 		switch m.fieldCursor {
 		case alertFieldChannel:
-			// Cycle forward through channel types.
+			// Cycle forward through channel types and reset field buffers.
 			m.channelIdx = (m.channelIdx + 1) % len(alert.Channels)
-			// Reset field buffers when channel type changes.
 			m.primaryBuf = nil
 			m.primaryPos = 0
 			m.secondaryBuf = nil
@@ -310,18 +355,10 @@ func (m AlertModel) updateForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case "s":
-		// 's' fires test-send from anywhere in the form.
+		// 's' fires test-send only when NOT inside a text field (handled above).
 		return m.doTestSend()
-
-	default:
-		// Route typing to the focused field.
-		switch m.fieldCursor {
-		case alertFieldPrimary:
-			m.primaryBuf, m.primaryPos = handleTextInput(m.primaryBuf, m.primaryPos, km)
-		case alertFieldSecondary:
-			m.secondaryBuf, m.secondaryPos = handleTextInput(m.secondaryBuf, m.secondaryPos, km)
-		}
 	}
+
 	return m, nil
 }
 
