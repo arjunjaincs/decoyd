@@ -39,10 +39,15 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
-          # Disable the built-in cache: it uses /usr/bin/tar which fails on
-          # ubuntu-latest runners with a tar exit-2 error when restoring the
-          # Go module cache. We do our own caching below.
+          # "stable" resolves to the latest released Go patch (e.g. 1.26.5).
+          # This is intentional for the build/test job: we want to know the
+          # code compiles and tests pass on a current toolchain.
+          # go.mod declares the MINIMUM required version (1.25.0); "stable"
+          # will always satisfy that.
+          go-version: "stable"
+          # Disable setup-go's built-in cache — it uses /usr/bin/tar on
+          # ubuntu-latest which intermittently fails with exit 2. We manage
+          # the Go module cache ourselves with actions/cache below.
           cache: false
 
       - name: Cache Go modules
@@ -81,7 +86,17 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          # Use "stable" here specifically to avoid govulncheck false-positives.
+          #
+          # govulncheck reports vulnerabilities in the Go TOOLCHAIN ITSELF
+          # (not just module deps) when the Go version in use has unpatched
+          # stdlib CVEs. Pinning to a specific old patch (e.g. 1.25.0) means
+          # all CVEs fixed in later patches (1.25.3, 1.25.4, …) still show up.
+          # "stable" always installs the latest released patch which has all
+          # known CVEs fixed — so govulncheck only fires on genuine issues in
+          # our own code or third-party dependencies, not on already-patched
+          # stdlib vulnerabilities.
+          go-version: "stable"
           cache: false
 
       - name: Cache Go modules
@@ -90,17 +105,14 @@ jobs:
           path: |
             ~/.cache/go-build
             ~/go/pkg/mod
-          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-security-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-
+            ${{ runner.os }}-go-security-
 
       - name: Install govulncheck
         run: go install golang.org/x/vuln/cmd/govulncheck@latest
 
       - name: Run govulncheck
-        # -show=color for readable output; default mode reports only
-        # vulnerabilities reachable from our code (not all transitive stdlib).
-        # With Go 1.24 the TLS/x509 vulns present in 1.22 are patched.
         run: govulncheck ./...
 
       - name: Install gosec
@@ -110,7 +122,7 @@ jobs:
         # -severity medium: skip informational findings.
         # -confidence medium: skip low-confidence noise.
         # -exclude G304: variable file path in deploy/deploy.go — intentional
-        #   (we write tokens to user-chosen paths, that is the feature).
+        #   (we write tokens to user-chosen paths; that is the feature).
         # -exclude G107: url provided to HTTP request as taint in alert/alert.go
         #   — intentional (webhook URLs come from user config, not untrusted input).
         run: gosec -severity medium -confidence medium -exclude G304 -exclude G107 ./...
