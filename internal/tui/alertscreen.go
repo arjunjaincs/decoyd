@@ -170,12 +170,11 @@ func (m *AlertModel) hasSecondaryField() bool {
 	return t == alert.ChannelTelegram || t == alert.ChannelNtfy
 }
 
-// maxFieldCursor returns the highest valid fieldCursor value given the current channel.
+// maxFieldCursor returns the highest valid fieldCursor value.
+// The Send button (alertFieldSend = 3) is always reachable; the secondary
+// field is conditionally shown but the cursor skips it when absent.
 func (m *AlertModel) maxFieldCursor() int {
-	if m.hasSecondaryField() {
-		return alertFieldSend
-	}
-	return alertFieldSend - 1 // skip secondary
+	return alertFieldSend
 }
 
 // buildChannelConfig builds a ChannelConfig from current form state.
@@ -338,6 +337,34 @@ func (m AlertModel) updateDone(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // doTestSend validates the form and fires an async test-send.
 func (m AlertModel) doTestSend() (AlertModel, tea.Cmd) {
+	primary := strings.TrimSpace(string(m.primaryBuf))
+	secondary := strings.TrimSpace(string(m.secondaryBuf))
+
+	// Replace trimmed values back into buffers so the form reflects what was used.
+	m.primaryBuf = []rune(primary)
+	m.primaryPos = len(m.primaryBuf)
+	m.secondaryBuf = []rune(secondary)
+	m.secondaryPos = len(m.secondaryBuf)
+
+	// Validate before touching the network.
+	if primary == "" {
+		m.state = alertStateDone
+		m.resultMsg = "Test send failed: " + m.primaryLabel() + " is required"
+		m.resultErr = true
+		return m, nil
+	}
+	// URL-based channels: require https:// or http:// prefix so the user gets a
+	// helpful message instead of the raw 'unsupported protocol scheme' net error.
+	chType := m.channelType()
+	if chType != alert.ChannelTelegram && chType != alert.ChannelNtfy {
+		if !strings.HasPrefix(primary, "https://") && !strings.HasPrefix(primary, "http://") {
+			m.state = alertStateDone
+			m.resultMsg = "Test send failed: Webhook URL must start with https://"
+			m.resultErr = true
+			return m, nil
+		}
+	}
+
 	cfg := m.buildChannelConfig()
 	a, err := alert.NewAlerter(cfg)
 	if err != nil {

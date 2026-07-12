@@ -58,11 +58,12 @@ First launch shows a splash screen → press any key → main menu.
 1. Select **3. Alert settings** from the main menu
 2. Press `Enter` on the **Channel** row to cycle through supported channels:
    - Discord webhook, Slack webhook, Telegram bot, Microsoft Teams, ntfy.sh, Generic webhook
-3. `Tab` / `Shift+Tab` to move between fields; type your webhook URL or bot token
-4. Press `s` (or navigate to **Send test alert** and press `Enter`) to fire a live test
+3. `Tab` / `Shift+Tab` to move between fields; type your webhook URL (must start with `https://`) or bot token
+4. Navigate to **Send test alert** and press `Enter`, or press `s` from anywhere on the form
 5. On success the config is saved automatically to `alert_config.json` in your data directory
 
 Credential fields are masked (`••••last4`) when unfocused so secrets don't linger on screen.
+If the URL or token is missing or malformed, a clear error is shown before any network request is made.
 
 **View / manage tokens**
 - Select **4. View tokens** from the main menu (Phase 4 dashboard — coming soon)
