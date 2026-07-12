@@ -96,6 +96,4 @@ The embedded database (`decoyd.db`) lives here. No server, no cloud, no account.
 
 MIT — see [LICENSE](LICENSE).
 
----
 
-*github.com/arjunjaincs/decoyd*
