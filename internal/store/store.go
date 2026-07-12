@@ -2,6 +2,11 @@
 // All tokens are JSON-serialized and stored in a single "tokens" bucket keyed
 // by the token's ID.  The store is safe for concurrent reads but serializes
 // writes through bbolt's internal locking.
+//
+// Cross-process access: bbolt holds an EXCLUSIVE write lock per file.  Only
+// ONE process may open the database at a time.  The background "decoyd watch"
+// service MUST NOT open this file — it uses triglog.JSONL for trigger events
+// and watch.deployed_tokens.json for token path discovery.
 package store
 
 import (
@@ -31,14 +36,24 @@ type Store struct {
 
 // Open opens (or creates) the bbolt database at dbPath.
 // The "tokens" bucket is created if it does not already exist.
-// Callers must call Close() when finished.
+//
+// Timeout: 500 ms.  If another process (e.g. a second TUI instance) already
+// holds the exclusive file lock, Open returns an error immediately rather than
+// blocking.  The caller should surface this as:
+//
+//	"Decoyd is already running — close it first."
+//
+// Note: the background 'decoyd watch' service MUST NOT call Open; it reads
+// token paths from deployed_tokens.json and writes triggers to triggers.jsonl.
 func Open(dbPath string) (*Store, error) {
-	db, err := bolt.Open(dbPath, 0o600, &bolt.Options{Timeout: 2 * time.Second})
+	db, err := bolt.Open(dbPath, 0o600, &bolt.Options{Timeout: 500 * time.Millisecond})
 	if err != nil {
-		return nil, fmt.Errorf("open store %q: %w", dbPath, err)
+		// bbolt returns a timeout error when another opener holds the lock.
+		// Surface a human-friendly message instead of the raw timeout.
+		return nil, fmt.Errorf("decoyd is already running — close it first (%w)", err)
 	}
 
-	// Ensure the bucket exists.
+	// Ensure the tokens bucket exists.
 	if err := db.Update(func(tx *bolt.Tx) error {
 		_, err := tx.CreateBucketIfNotExists(tokenBucket)
 		return err

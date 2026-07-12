@@ -12,7 +12,8 @@
 | 1 — Token Generation | ✅ Complete | 30 pass |
 | 2 — Deployment | ✅ Complete | 22 pass, 4 skip (Linux perms on Windows) |
 | 3 — Alerting | ✅ Complete | 30 pass, 1 skip (Linux file perms on Windows) |
-| **Total** | | **88 pass · 5 skip · 0 fail** |
+| 4 — Detection Engine | ⏳ Pending CI `-race` | 109 pass · 5 skip · 0 fail (local, no CGO) |
+| **Total** | | **109 pass · 5 skip · 0 fail** |
 
 Cross-compile: `GOOS=linux` ✅ `GOOS=windows` ✅  
 Stack: Go 1.25 · bubbletea v1.3 · lipgloss v1.1 · bbolt v1.5 · x/crypto v0.54 · yaml.v3
@@ -653,6 +654,344 @@ Guard: if `primaryBuf` is empty after trim, skip (no point saving a blank config
 
 ---
 
+---
+
 ## Next: Phase 4 — Detection Engine
 
-The background watcher (`internal/watch`), dashboard screen, and alert quality features (debounce, rate limiting, quiet hours). The most technically complex phase — budget extra slack.
+---
+
+## Phase 4 — Step 0: Multi-channel Config + Per-Token Assignment
+
+### What was built
+
+**`internal/alert/alert.go`**
+- `ChannelConfig.ID` — stable 8-hex ID generated once on first save by `GenerateChannelID()` (crypto/rand).
+- `AlertConfig.ResolveChannel(id)` — looks up a channel by ID.
+- `AlertConfig.DefaultChannel()` — returns the channel at DefaultIndex, clamped.
+- `AlertConfig.ChannelForToken(alertChannelID)` — used by the watcher to resolve which channel to alert on. Falls back silently to default if the assigned channel is deleted; returns `(_, false)` only if zero channels are configured.
+- `Load()` now backfills IDs for old config files (legacy compat) and persists the backfill to disk.
+- `Save()` assigns IDs to any channel that lacks one before writing.
+
+**`internal/tui/alertscreen.go`**
+- New state: `alertStateList` — entry point when at least one channel exists. Shows all saved channels with type label, masked credential hint, and a `★` default marker.
+- New state: `alertStateConfirmDelete` — `d` from the list, `y/enter` deletes, `n/esc` cancels.
+- `n` or Enter on "Add new channel" → blank form for a new channel.
+- Enter on an existing row → pre-populates form from that channel's config; `editingID` is set so saves update the right entry.
+- `*` sets a new default and persists immediately.
+- `esc` from form returns to list (not exit) when channels exist.
+- `autosaveCredentials()` and `doTestSend()` now upsert into the full `channelList` by ID instead of overwriting a single-channel config. `editingID` is updated after first save so subsequent edits update the same record.
+
+**`internal/tui/tokenlist.go`**
+- New state: `tokenListStateAssign` — press `a` on any token to enter the channel picker.
+- Picker shows all configured channels with type label, masked hint, `★` default marker, and `✓ current` annotation for the token's current assignment.
+- Final row: "✕ Remove assignment (use default)" — clears `Token.AlertChannelID`.
+- On confirm: `st.UpdateToken(tok)` with the new `AlertChannelID`.
+- Footer updated to include `a assign channel`.
+- `dataDir string` added to `TokenListModel` and `NewTokenListModel`.
+
+**`internal/alert/multichannel_test.go`** — 13 new tests:
+- `TestGenerateChannelIDIsUnique`
+- `TestResolveChannelFound/NotFound/EmptyList`
+- `TestChannelForTokenUsesAssigned/FallsBackToDefault/DeletedAssignmentFallsBack/NoChannels`
+- `TestSaveBackfillsIDs/PreservesExistingIDs/MultiChannelSaveAndLoad/LoadBackfillsLegacyMissingID`
+
+---
+
+## Phase 4 — Detection Engine
+
+### What was built
+
+#### Store: trigger event persistence (`internal/store/store.go`)
+
+- New `TriggerStatus` type and constants: `TriggerSent`, `TriggerFailed`, `TriggerRateLimited`, `TriggerQuietHours`, `TriggerPending`.
+- `TriggerEvent` struct: `ID`, `TokenID`, `TokenType`, `Path`, `TriggeredAt`, `EventType`, `Process` (Linux only, future), `Status`, `AlertError` (sanitizeErr output only).
+- New bbolt bucket: `"triggers"` created alongside `"tokens"` in `Open()`.
+- `SaveTrigger(e)` — **durability contract**: call BEFORE alert dispatch. Returns error for empty ID.
+- `UpdateTriggerStatus(id, status, alertErr)` — no-op (not error) for unknown IDs.
+- `ListTriggers()` — all events, newest-first (sorts by `TriggeredAt`).
+- `ListTriggersByToken(tokenID)` — filtered list, newest-first.
+
+#### Shared watcher helpers (`internal/watch/watch.go`)
+
+- `newEventID()` — crypto-random 8-byte hex trigger ID.
+- `WatcherStatus` struct (Running, StartedAt, Watching count).
+- `sendAlert()` — loads alert config, resolves channel via `ChannelForToken`, constructs alerter, sends. Returns `(TriggerStatus, sanitizedErr)`.
+- `sanitizeAlertErr()` — caps error string at 120 chars; alert package's sanitizeErr already strips URLs before returning.
+- `markTokenTriggered()` — sets `Token.Triggered = true` and `Token.TriggeredAt` on first trigger.
+
+#### Linux watcher (`internal/watch/inotify_linux.go`)
+
+- Raw `inotify(7)` via `golang.org/x/sys/unix`.
+- Watch mask: `IN_OPEN | IN_ACCESS | IN_MODIFY | IN_MOVE_SELF | IN_DELETE_SELF`.
+- `InotifyInit1(IN_CLOEXEC)` + `Pipe2(O_CLOEXEC)` for graceful stop via self-pipe.
+- `unix.Poll` with 1s timeout on `[inotifyFd, stopPipe[0]]`.
+- Binary inotify_event parsing via `unsafe.Pointer` (suppressed `G103`).
+- Stop: write to stopPipe[1], wait for goroutine, then close all fds.
+- Process attribution: **not available** via standard inotify. Would require `fanotify(7)` + `CAP_SYS_ADMIN`. Process field is always empty in v1. Documented in code.
+
+#### Windows watcher (`internal/watch/watch_windows.go`)
+
+- `github.com/fsnotify/fsnotify` on parent directory, filtered to token filename.
+- Events: `Write`, `Rename`, `Remove` → event types `write`, `rename`, `delete`. `Create` → `create`. `Chmod` ignored.
+- Same `Watcher` struct and method signatures as Linux implementation (no shared interface).
+- **Read-detection limitation**: pure read-only `CreateFile(GENERIC_READ)` handles are NOT detectable without kernel minifilter. Documented prominently in package comment and `decoyd install` output.
+
+Both implementations share the same alert quality pipeline:
+
+```
+inotify/fsnotify event
+  ↓
+Debounce (2s window, per path, time.AfterFunc)
+  ↓
+Rate limit (5/token/hr, per-hour sliding window)   → TriggerRateLimited if exceeded (recorded, not sent)
+  ↓
+Quiet hours (wrap-midnight, e.g. 22:00–06:00)      → TriggerQuietHours if inside (recorded, not sent)
+  ↓
+SaveTrigger(TriggerPending)  ← WRITE TO BBOLT FIRST
+  ↓
+sendAlert → alert.Send
+  ↓
+UpdateTriggerStatus(Sent | Failed)
+```
+
+#### Tests (`internal/watch/watch_test.go`) — 18 tests:
+
+| Test | Category |
+|---|---|
+| `TestDebouncer_FiresOnceAfterSilence` | Debounce |
+| `TestDebouncer_SeparateKeysAreTreatedIndependently` | Debounce |
+| `TestDebouncer_StopCancelsTimers` | Debounce |
+| `TestRateLimiter_AllowsUpToLimit` | Rate limit |
+| `TestRateLimiter_ZeroMeansUnlimited` | Rate limit |
+| `TestRateLimiter_SeparateTokensAreIndependent` | Rate limit |
+| `TestRateLimiter_ResetRestoresQuota` | Rate limit |
+| `TestInQuietHours_Disabled` | Quiet hours |
+| `TestInQuietHours_WrapMidnightInside` | Quiet hours |
+| `TestInQuietHours_WrapMidnightOutside` | Quiet hours |
+| `TestInQuietHours_ZeroWidthWindow` | Quiet hours |
+| `TestStore_SaveAndListTriggers` | Durability |
+| `TestStore_UpdateTriggerStatus` | Durability |
+| `TestStore_UpdateTriggerStatus_Failure` | Durability |
+| `TestStore_SaveTrigger_EmptyIDReturnsError` | Durability |
+| `TestStore_ListTriggersByToken` | Durability |
+| `TestStore_ListTriggers_NewestFirst` | Durability |
+| `TestStore_UpdateTriggerStatus_NoopForUnknownID` | Durability |
+
+#### CLI additions (`cmd/decoyd/`)
+
+- `decoyd watch` — headless watcher, blocks on SIGINT/SIGTERM, prints token count on start.
+- `decoyd triggers` — prints all trigger events in a tab-aligned table.
+- `decoyd install` (Linux) — writes `~/.config/systemd/user/decoyd.service` with `UMask=0077`, then runs `systemctl --user daemon-reload && enable --now`.
+- `decoyd install` (Windows) — runs `schtasks /Create /SC ONLOGON /DELAY 0:30` for `Decoyd\DecoydWatch`; prints read-detection limitation.
+
+#### Notes on race detection
+
+`go test -race` requires CGO_ENABLED=1. On Windows without a C toolchain, use Linux CI or WSL2 to run `go test -race ./internal/watch/... ./internal/alert/...`.
+
+---
+
+### Known limitations (documented)
+
+| Platform | Limitation |
+|---|---|
+| Linux | Process attribution (who opened the file) requires `fanotify(7)` + `CAP_SYS_ADMIN`. inotify only tells us *that* the file was opened. |
+| Windows | Pure read-only `CreateFile(GENERIC_READ)` handles are NOT detected. Only Write/Rename/Remove events are surfaced by fsnotify. |
+
+---
+
+## Architecture fix: trigger storage reversal (post Phase 4 review)
+
+### What went wrong
+
+The original implementation plan explicitly designed around a known bbolt constraint:
+
+> "bbolt holds an exclusive write lock per file. Running `decoyd` (TUI) and `decoyd watch` simultaneously against the same `decoyd.db` would deadlock the second opener. **Decision:** Trigger events go into a separate append-only `triggers.jsonl`."
+
+What was actually built: a `"triggers"` bbolt bucket inside the same `decoyd.db`, plus `markTokenTriggered()` writing to the `"tokens"` bucket from the watcher goroutine. This was **not a deliberate override of the design** — the JSONL constraint was lost when TriggerEvent was moved into `store.go` because that's where bbolt lives. The conflict was never re-evaluated.
+
+Additionally, `store.Open()` had a 2-second generic timeout instead of the approved 500ms fail-fast with a clear error message. That specific decision was also never implemented.
+
+### Exact failure scenario (now fixed)
+
+Without the fix:
+1. `decoyd watch` (systemd) calls `store.Open()` → acquires exclusive `LOCK_EX` on `decoyd.db`.
+2. User opens TUI → `store.Open()` blocks for 2 seconds → times out → TUI fails to start.
+3. Or: TUI is open → watcher service starts → watcher's `store.Open()` fails → watcher exits silently.
+4. Any real trigger that fires during a TUI session is not recorded (lost evidence).
+
+### Fix applied
+
+| Component | Before | After |
+|---|---|---|
+| `store.go` | `"triggers"` bucket + SaveTrigger/UpdateTriggerStatus/ListTriggers | Removed entirely |
+| `store.Open()` | 2s generic timeout | 500ms, returns `"decoyd is already running — close it first"` |
+| `internal/triglog/` | Did not exist | New package: `TriggerEvent`, `TriggerStatus`, `Append()`, `Load()`, `LoadByToken()` |
+| `internal/watch/deployed.go` | Did not exist | `WriteDeployedSnapshot()` / `ReadDeployedSnapshot()` — watcher's token source in headless mode |
+| Watcher (both platforms) | `st.SaveTrigger` / `st.UpdateTriggerStatus` | `triglog.Append()` |
+| `watch.New(st, dataDir)` | Always used st for token list | `st == nil` → headless mode → reads `deployed_tokens.json` |
+| `cmd/decoyd/main.go` | `watch`/`triggers`/`install` dispatched after `store.Open()` | Dispatched **before** `store.Open()` |
+| `cmdTriggers` | Read from `st.ListTriggers()` | Read from `triglog.Load(dataDir)` |
+
+### triglog durability contract (JSONL)
+
+The original write-before-send guarantee is preserved using the JSONL deduplication pattern:
+
+```
+1. triglog.Append(TriggerPending)   ← written BEFORE HTTP call
+2. sendAlert(...)
+3. triglog.Append(TriggerSent|TriggerFailed)  ← supersedes #1
+   (Load() deduplicates by ID; latest record per ID wins)
+```
+
+If the process is killed between steps 1 and 2, the `TriggerPending` record persists on disk. The dashboard shows it with status `pending`, which is evidence the event happened.
+
+### TestStore_SecondOpenerFailsFast (new test, verified)
+
+```
+=== RUN   TestStore_SecondOpenerFailsFast
+    watch_test.go:336: second Open failed in 462.8ms with:
+        decoyd is already running — close it first (timeout)
+--- PASS: TestStore_SecondOpenerFailsFast (0.47s)
+```
+
+The fail-fast works. A second opener (or the TUI while the watcher holds the lock) fails in under 500ms with a human-readable error instead of a silent 2-second hang.
+
+---
+
+## Race detection status
+
+`go test -race` requires CGO (`CGO_ENABLED=1`). GCC is not installed on this Windows development machine. The race detector **was not run** on this platform. It must be run in Linux CI or WSL2 before this phase is considered fully verified for concurrent safety.
+
+### Manual concurrent-state audit (substitute for -race)
+
+Every shared mutable variable in the watcher is enumerated below with the lock that protects it:
+
+| Variable | Goroutines that access it | Protecting lock |
+|---|---|---|
+| `w.watched` (map wd→token) | `loop()` reads; `Start()`/`Stop()`/`AddToken()` write | `w.mu sync.RWMutex` |
+| `w.paths` (map path→wd) | same as above | `w.mu` |
+| `w.running`, `w.startedAt` | all callers | `w.mu` |
+| `w.inoFd` / `w.stopPipe` (Linux) | `loop()` reads; `Start()`/`Stop()` write | `w.mu` |
+| `w.fsw`, `w.stopCh`, `w.dirs` (Windows) | `loop()` reads; `Start()`/`Stop()` write | `w.mu` |
+| `w.triggers` (cache slice) | `fire()` goroutines write; `RecentTriggers()` reads | `w.trigMu sync.Mutex` |
+| `Debouncer.timers` | `Trigger()` and timer callbacks (both may run concurrently) | `d.mu sync.Mutex` |
+| `RateLimiter.counts` / `.epoch` | `Allow()` — called from `fire()` goroutines | `r.mu sync.Mutex` |
+| `triglog.appendMu` (package-level) | `Append()` — may be called from concurrent `fire()` goroutines | `appendMu sync.Mutex` |
+| `triggers.jsonl` (file) | ONE writer process (the watcher); multiple reader processes | `appendMu` within process; O_APPEND on POSIX ensures atomic line writes |
+
+**Identified concerns:**
+
+1. `fire()` is called from `time.AfterFunc` goroutines — one per debounce key. Multiple can run concurrently for different paths. All shared state (`w.trigMu`, `r.mu`, `appendMu`) has mutex protection. ✓
+
+2. `w.mu.RLock()` is held inside `parseEvents()`/`handleEvent()` only for the map lookup — the `fire()` callback is called outside the lock (after `w.mu.RUnlock()`). No lock is held across the goroutine boundary. ✓
+
+3. `triglog.Append()` opens the file, writes, and closes within the `appendMu` lock on each call. Two concurrent calls from different `fire()` goroutines serialize on `appendMu`. On POSIX, even without the mutex, O_APPEND writes ≤ PIPE_BUF are atomic; the mutex is belt-and-suspenders for Windows correctness. ✓
+
+4. `markTokenTriggered()` writes to bbolt (`st.UpdateToken`). bbolt serializes transactions internally. Called at most once per token per run (guarded by `tok.Triggered` check). ✓
+
+**Residual risk:** the audit cannot substitute for the race detector. `go test -race` must be run in Linux CI or WSL2 to confirm there are no data races not caught by inspection. This is a **hard blocker before production use**.
+
+---
+
+## Phase 4 — Detection Engine (closed 2026-07-12)
+
+### Three closing items completed
+
+#### 1. Singleton watcher lock (`internal/watch/watchlock.go`)
+
+Problem: since the bbolt lock removal, a headless `decoyd watch` (systemd/scheduled-task) and the TUI's auto-started internal watcher could both run against the same files with no coordination — duplicate alerts, split rate-limiter state.
+
+Solution: a PID file at `<dataDir>/watcher.pid` using `O_CREATE|O_EXCL` for atomic creation:
+
+| Scenario | Behaviour |
+|---|---|
+| No file exists | `O_EXCL` create succeeds → write PID → return release func |
+| File exists, holder alive | Refuse with `ErrWatcherRunning` naming the PID |
+| File exists, holder dead | Overwrite (stale lock → treat as available) |
+| TUI opens while watcher holds lock | `Start()` returns `ErrWatcherRunning`, TUI degrades to dashboard-only |
+
+The held-open file handle acts as an OS-level lock on Windows (a second `O_EXCL` open will fail even for the same PID). On Linux, `isProcessAlive` uses `signal(pid, 0)` (ESRCH → dead, nil/EPERM → alive).
+
+Error message format: `"watcher already running: PID 5260 holds /path/watcher.pid — stop that process first, or delete the file if it is stale"`
+
+**Tests (3 new):**
+
+| Test | Asserts |
+|---|---|
+| `TestWatchLock_SecondOpenerIsRefused` | Two `Watcher.Start()` calls on same dir: second returns `ErrWatcherRunning` |
+| `TestWatchLock_ReleaseAllowsReacquire` | After `w1.Stop()`, a new watcher acquires the lock |
+| `TestWatchLock_StalePIDOverwritten` | PID 2147483647 (guaranteed dead) is treated as stale, overwritten |
+
+#### 2. `WriteDeployedSnapshot` wired into deploy and delete flows
+
+**Deploy flow** (`internal/tui/deployscreen.go`, `doDeploy()`):
+After a successful non-dry-run deploy, `watch.WriteDeployedSnapshot(dataDir, snap)` is called immediately. The headless watcher picks up the new path at its next inotify/fsnotify registration cycle without a restart.
+
+**Delete flow** (`internal/tui/tokenlist.go`, `updateConfirmDelete()`):
+After `st.DeleteToken(id)` succeeds, `watch.WriteDeployedSnapshot(dataDir, snap)` is called with the updated (minus-deleted) list. The headless watcher stops watching the removed path at its next config reload.
+
+`NewDeployModel` now takes `dataDir string` (was previously store-only). `root.go` passes `m.dataDir` at all call sites.
+
+**Tests (2 new in `watch_test.go`):**
+
+| Test | Asserts |
+|---|---|
+| `TestSnapshot_DeployAddsToken` | Write snapshot → read back → token present with correct fields |
+| `TestSnapshot_DeleteRemovesToken` | Write two tokens → overwrite with one removed → reader sees only remaining |
+
+#### 3. Dashboard screen (`statusscreen.go`, `triggerdetail.go`)
+
+**`StatusModel`** (`internal/tui/statusscreen.go`):
+- Watcher status row: shows `● running uptime Xd Yh` (via `WatcherRef.Status()`) or `● running (headless)` (via `watcher.pid` read) or `○ not running`
+- Trigger list: reads `triglog.Load(dataDir)` — newest-first, capped at 50
+- 5-second poll refresh via `tea.Tick` (so headless-watcher triggers appear within 5s)
+- `↑/↓` navigate, `enter` drills to detail, `r` manual refresh, `esc` back to menu
+- `WatcherRef *watch.Watcher` field set optionally by root.go for TUI-embedded mode
+
+**`TriggerDetailModel`** (`internal/tui/triggerdetail.go`):
+- Shows: token type + short ID, path, timestamp + ago, event type, process attribution (`unknown` — v1 limitation), alert status with error text if failed, full event-id
+- `esc` returns to Status dashboard
+
+**`root.go` changes:**
+- `ScreenStatus` and `ScreenTriggerDetail` added to the `Screen` enum
+- `MenuActionMsg{Index: 3}` routes to Status (was previously commented out)
+- `StatusDoneMsg` → `ScreenMainMenu`
+- `ShowTriggerDetailMsg` → `ScreenTriggerDetail`
+- `TriggerDetailDoneMsg` → `ScreenStatus`
+- `statusScreen StatusModel` sub-model added, resize propagation included
+- `watcher *watch.Watcher` field added for future TUI-embedded watcher wiring
+
+---
+
+## CI `-race` status
+
+`ci.yml` already runs `go test -v -race ./...` on `ubuntu-latest` (native Linux build/test leg, line 76). This covers `./internal/watch/...`, `./internal/alert/...`, and `./internal/triglog/...` as required. No CI change needed.
+
+**Phase 4 is closed locally. The phase is considered FULLY CLOSED when the `ubuntu-latest` CI run with `-race` goes green on the `main` branch.** Update this entry with the CI run link and timestamp when that happens.
+
+---
+
+## Next: Phase 5 — Polish
+
+Onboarding wizard, multi-profile support, config export/import, full error-handling audit, help overlay per-screen content.
+
+---
+
+## Manual verification — 2026-07-12
+
+Following the requested verification steps:
+
+1. `decoyd list` confirmed token `5c60fa0e04e9a2cf` is deployed at `C:\Users\MSI\Downloads\.github_token`.
+2. Started `decoyd watch` in a background terminal.
+3. Touched `C:\Users\MSI\Downloads\.github_token` using `Add-Content -Path "C:\Users\MSI\Downloads\.github_token" -Value " "`.
+4. Waited 10 seconds.
+5. Ran `decoyd triggers`. Exact verbatim output:
+
+```text
+No trigger events recorded yet.
+```
+
+**Analysis (What happened & Discord status):**
+Because the token was deployed *before* we wired the `WriteDeployedSnapshot` logic into the TUI in Phase 4, the `deployed_tokens.json` file did not exist yet on this machine. Consequently, `decoyd watch` started up monitoring 0 tokens (as noted in its startup logs). Therefore, the file touch went unmonitored by the headless watcher, and **no Discord message arrived**.
+
+To fix this, the token simply needs to be re-deployed or deleted/re-added via the TUI so the new logic writes the `deployed_tokens.json` snapshot file to the config directory. I have stopped here without making any file changes, per your instructions!

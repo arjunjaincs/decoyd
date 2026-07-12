@@ -6,6 +6,8 @@ package alert
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -91,8 +93,11 @@ var ErrMisconfigured = errors.New("alert channel is not configured")
 // included in error messages, log output, or any string displayed in the TUI.
 // Use MaskSecret for any display string involving these fields.
 type ChannelConfig struct {
+	// ID is a stable 8-hex identifier generated once on first save. It is the
+	// value stored in Token.AlertChannelID to bind a token to a channel.
+	ID string `json:"id,omitempty"`
 	Type string `json:"type"`
-	// Label is a user-assigned name shown in the UI; not sensitive.
+	// Label is an optional user-assigned name shown in the channel list.
 	Label string `json:"label,omitempty"`
 	// WebhookURL is used by Discord, Slack, Teams, and the generic webhook channel.
 	WebhookURL string `json:"webhook_url,omitempty"`
@@ -105,18 +110,62 @@ type ChannelConfig struct {
 	Topic     string `json:"topic,omitempty"`
 }
 
+// GenerateChannelID returns a cryptographically random 8-hex channel ID.
+func GenerateChannelID() string {
+	b := make([]byte, 4)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
 // AlertConfig is the root config shape written to alert_config.json.
-// Phase 3 UI configures one channel at a time; the slice + DefaultIndex
-// structure is forward-compatible with multi-channel management (Phase 5).
 type AlertConfig struct {
 	Channels     []ChannelConfig `json:"channels"`
 	DefaultIndex int             `json:"default_index"`
+}
+
+// ResolveChannel returns the ChannelConfig whose ID matches id.
+// Returns false if no channel with that ID is configured.
+func (c AlertConfig) ResolveChannel(id string) (ChannelConfig, bool) {
+	for _, ch := range c.Channels {
+		if ch.ID == id {
+			return ch, true
+		}
+	}
+	return ChannelConfig{}, false
+}
+
+// DefaultChannel returns the channel at DefaultIndex.
+// Returns false if Channels is empty.
+func (c AlertConfig) DefaultChannel() (ChannelConfig, bool) {
+	if len(c.Channels) == 0 {
+		return ChannelConfig{}, false
+	}
+	idx := c.DefaultIndex
+	if idx < 0 || idx >= len(c.Channels) {
+		idx = 0
+	}
+	return c.Channels[idx], true
+}
+
+// ChannelForToken returns the alert channel to use for a token:
+//   - If alertChannelID is non-empty and a matching channel is found, returns it.
+//   - Otherwise falls back to the default channel.
+//   - Returns false only when no channels are configured at all.
+func (c AlertConfig) ChannelForToken(alertChannelID string) (ChannelConfig, bool) {
+	if alertChannelID != "" {
+		if ch, ok := c.ResolveChannel(alertChannelID); ok {
+			return ch, true
+		}
+		// Assigned channel was deleted; fall through to default.
+	}
+	return c.DefaultChannel()
 }
 
 const configFileName = "alert_config.json"
 
 // Load reads and decodes alert_config.json from dataDir.
 // Returns an empty AlertConfig (not an error) when the file does not exist yet.
+// Backfills IDs for any channel record that pre-dates ID generation.
 func Load(dataDir string) (AlertConfig, error) {
 	path := filepath.Join(dataDir, configFileName)
 	data, err := os.ReadFile(path) // #nosec G304 -- path is always filepath.Join(dataDir, configFileName), never user input
@@ -130,13 +179,32 @@ func Load(dataDir string) (AlertConfig, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return AlertConfig{}, fmt.Errorf("parse alert config: %w", err)
 	}
+	// Backfill IDs for channels saved before ID generation was introduced.
+	changed := false
+	for i := range cfg.Channels {
+		if cfg.Channels[i].ID == "" {
+			cfg.Channels[i].ID = GenerateChannelID()
+			changed = true
+		}
+	}
+	if changed {
+		// Persist the backfilled IDs silently; ignore errors (best-effort).
+		_ = Save(dataDir, cfg)
+	}
 	return cfg, nil
 }
 
 // Save marshals cfg to JSON and writes it atomically to dataDir/alert_config.json.
 // The file is created with permission 0600 so only the owning user can read
 // the webhook URLs and bot tokens stored inside.
+// All channels without an ID are assigned one before saving.
 func Save(dataDir string, cfg AlertConfig) error {
+	// Ensure every channel has a stable ID.
+	for i := range cfg.Channels {
+		if cfg.Channels[i].ID == "" {
+			cfg.Channels[i].ID = GenerateChannelID()
+		}
+	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal alert config: %w", err)

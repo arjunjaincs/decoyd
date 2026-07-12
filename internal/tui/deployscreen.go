@@ -11,6 +11,7 @@ import (
 	"github.com/arjunjaincs/decoyd/internal/deploy"
 	"github.com/arjunjaincs/decoyd/internal/store"
 	"github.com/arjunjaincs/decoyd/internal/tokens"
+	"github.com/arjunjaincs/decoyd/internal/watch"
 )
 
 // ----------------------------------------------------------------------------
@@ -44,6 +45,7 @@ type DeployModel struct {
 	height  int
 	state   deployState
 	st      *store.Store
+	dataDir string // for WriteDeployedSnapshot after a real deploy
 
 	// Token list (undeployed only — show all for now so user can re-deploy elsewhere)
 	allTokens []tokens.Token
@@ -61,11 +63,12 @@ type DeployModel struct {
 }
 
 // NewDeployModel creates a fresh DeployModel, loading tokens from the store.
-func NewDeployModel(width, height int, st *store.Store) DeployModel {
+func NewDeployModel(width, height int, st *store.Store, dataDir string) DeployModel {
 	m := DeployModel{
-		width:  width,
-		height: height,
-		st:     st,
+		width:   width,
+		height:  height,
+		st:      st,
+		dataDir: dataDir,
 	}
 	// Load presets (soft failure — show empty list).
 	presets, _ := deploy.PresetDirs()
@@ -77,6 +80,24 @@ func NewDeployModel(width, height int, st *store.Store) DeployModel {
 		m.allTokens = ts
 	}
 	return m
+}
+
+// buildDeployedSnapshot converts the in-memory token list into the minimal
+// slice that watch.WriteDeployedSnapshot expects.
+func buildDeployedSnapshot(toks []tokens.Token) []watch.DeployedToken {
+	var out []watch.DeployedToken
+	for _, t := range toks {
+		if t.DeployedPath == "" {
+			continue
+		}
+		out = append(out, watch.DeployedToken{
+			ID:             t.ID,
+			Type:           t.Type,
+			DeployedPath:   t.DeployedPath,
+			AlertChannelID: t.AlertChannelID,
+		})
+	}
+	return out
 }
 
 // Init satisfies tea.Model.
@@ -244,6 +265,12 @@ func (m DeployModel) doDeploy(dryRun bool) (DeployModel, tea.Cmd) {
 		// Refresh local list.
 		if ts, err := m.st.ListTokens(); err == nil {
 			m.allTokens = ts
+		}
+		// Sync deployed_tokens.json so the headless watcher picks up the
+		// new path without needing a restart.
+		if m.dataDir != "" {
+			snap := buildDeployedSnapshot(m.allTokens)
+			_ = watch.WriteDeployedSnapshot(m.dataDir, snap)
 		}
 	}
 
