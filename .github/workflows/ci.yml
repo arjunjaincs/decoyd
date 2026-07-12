@@ -39,8 +39,21 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
-          cache: true
+          go-version-file: go.mod
+          # Disable the built-in cache: it uses /usr/bin/tar which fails on
+          # ubuntu-latest runners with a tar exit-2 error when restoring the
+          # Go module cache. We do our own caching below.
+          cache: false
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
 
       - name: Build (cross-compile ${{ matrix.goos }}/${{ matrix.goarch }})
         env:
@@ -68,20 +81,36 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
-          cache: true
+          go-version-file: go.mod
+          cache: false
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
 
       - name: Install govulncheck
         run: go install golang.org/x/vuln/cmd/govulncheck@latest
 
       - name: Run govulncheck
+        # -show=color for readable output; default mode reports only
+        # vulnerabilities reachable from our code (not all transitive stdlib).
+        # With Go 1.24 the TLS/x509 vulns present in 1.22 are patched.
         run: govulncheck ./...
 
       - name: Install gosec
         run: go install github.com/securego/gosec/v2/cmd/gosec@latest
 
       - name: Run gosec
-        # -severity medium: skip informational; -confidence medium: skip noise.
-        # -exclude G304: flagged for variable file paths in deploy — intentional.
-        # -fmt sarif outputs results for GitHub Advanced Security if available.
-        run: gosec -severity medium -confidence medium -exclude G304 ./...
+        # -severity medium: skip informational findings.
+        # -confidence medium: skip low-confidence noise.
+        # -exclude G304: variable file path in deploy/deploy.go — intentional
+        #   (we write tokens to user-chosen paths, that is the feature).
+        # -exclude G107: url provided to HTTP request as taint in alert/alert.go
+        #   — intentional (webhook URLs come from user config, not untrusted input).
+        run: gosec -severity medium -confidence medium -exclude G304 -exclude G107 ./...
