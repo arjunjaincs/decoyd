@@ -41,6 +41,9 @@ func cmdInstall(dataDir string) error {
 
 	// User systemd unit directory.
 	unitDir := filepath.Join(os.Getenv("HOME"), ".config", "systemd", "user")
+	// #nosec G703 -- unitDir is filepath.Join(HOME, ".config/systemd/user"): same
+	// reasoning as the OpenFile suppression below — HOME is the running user's own
+	// home directory, set by their login shell; not attacker-controlled.
 	if err := os.MkdirAll(unitDir, 0o700); err != nil {
 		return fmt.Errorf("create systemd user dir: %w", err)
 	}
