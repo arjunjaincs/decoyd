@@ -6,6 +6,8 @@ package alert
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -91,6 +93,9 @@ var ErrMisconfigured = errors.New("alert channel is not configured")
 // included in error messages, log output, or any string displayed in the TUI.
 // Use MaskSecret for any display string involving these fields.
 type ChannelConfig struct {
+	// ID is a stable 8-hex-byte identifier for this channel entry, generated
+	// once by GenerateChannelID and persisted. Used as Token.AlertChannelID.
+	ID   string `json:"id,omitempty"`
 	Type string `json:"type"`
 	// Label is a user-assigned name shown in the UI; not sensitive.
 	Label string `json:"label,omitempty"`
@@ -106,17 +111,86 @@ type ChannelConfig struct {
 }
 
 // AlertConfig is the root config shape written to alert_config.json.
-// Phase 3 UI configures one channel at a time; the slice + DefaultIndex
-// structure is forward-compatible with multi-channel management (Phase 5).
+// DefaultID is the ID of the channel used for tokens with no explicit
+// assignment; it matches the ID field of one of the entries in Channels.
+// DefaultIndex is retained for JSON round-trip compatibility with legacy
+// files that predate the ID field; it is ignored in all new logic.
 type AlertConfig struct {
 	Channels     []ChannelConfig `json:"channels"`
-	DefaultIndex int             `json:"default_index"`
+	DefaultIndex int             `json:"default_index"` // legacy compat only
+	DefaultID    string          `json:"default_id,omitempty"`
+}
+
+// ----------------------------------------------------------------------------
+// Channel ID generation
+// ----------------------------------------------------------------------------
+
+// GenerateChannelID returns a cryptographically random 8-byte (16 hex char)
+// channel identifier. Called once when a channel entry is first saved.
+func GenerateChannelID() (string, error) {
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generate channel ID: %w", err)
+	}
+	return hex.EncodeToString(b), nil
+}
+
+// ----------------------------------------------------------------------------
+// AlertConfig resolution helpers
+// ----------------------------------------------------------------------------
+
+// DefaultChannel returns the ChannelConfig whose ID matches cfg.DefaultID.
+// Falls back to the first channel if DefaultID is unset or stale.
+// Returns the zero value and false when Channels is empty.
+func (cfg AlertConfig) DefaultChannel() (ChannelConfig, bool) {
+	if len(cfg.Channels) == 0 {
+		return ChannelConfig{}, false
+	}
+	for _, ch := range cfg.Channels {
+		if ch.ID == cfg.DefaultID && cfg.DefaultID != "" {
+			return ch, true
+		}
+	}
+	// DefaultID unset or stale — fall back to first entry.
+	return cfg.Channels[0], true
+}
+
+// ResolveChannel returns the ChannelConfig with the given ID.
+// Returns the zero value and false if no channel has that ID.
+func (cfg AlertConfig) ResolveChannel(id string) (ChannelConfig, bool) {
+	if id == "" {
+		return ChannelConfig{}, false
+	}
+	for _, ch := range cfg.Channels {
+		if ch.ID == id {
+			return ch, true
+		}
+	}
+	return ChannelConfig{}, false
+}
+
+// ChannelForToken returns the alert channel to use for a token with the given
+// AlertChannelID. Priority:
+//  1. If tokenChannelID is non-empty and a channel with that ID exists → use it.
+//  2. If the assigned channel was deleted (stale ID) → fall back to default silently.
+//  3. If tokenChannelID is empty → use the default channel.
+//  4. If there are no channels at all → return zero value and false.
+func (cfg AlertConfig) ChannelForToken(tokenChannelID string) (ChannelConfig, bool) {
+	if tokenChannelID != "" {
+		if ch, ok := cfg.ResolveChannel(tokenChannelID); ok {
+			return ch, true
+		}
+		// Assigned channel was deleted — fall through to default.
+	}
+	return cfg.DefaultChannel()
 }
 
 const configFileName = "alert_config.json"
 
 // Load reads and decodes alert_config.json from dataDir.
 // Returns an empty AlertConfig (not an error) when the file does not exist yet.
+// If any channel entry is missing an ID (legacy config), Load backfills IDs
+// and persists the updated file before returning.
 func Load(dataDir string) (AlertConfig, error) {
 	path := filepath.Join(dataDir, configFileName)
 	data, err := os.ReadFile(path) // #nosec G304 -- path is always filepath.Join(dataDir, configFileName), never user input
@@ -130,13 +204,51 @@ func Load(dataDir string) (AlertConfig, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return AlertConfig{}, fmt.Errorf("parse alert config: %w", err)
 	}
+	// Backfill IDs for any channel entry that predates the ID field.
+	// If any were missing, persist the healed config immediately.
+	needsSave := false
+	for i := range cfg.Channels {
+		if cfg.Channels[i].ID == "" {
+			id, err := GenerateChannelID()
+			if err != nil {
+				return AlertConfig{}, fmt.Errorf("backfill channel ID: %w", err)
+			}
+			cfg.Channels[i].ID = id
+			needsSave = true
+		}
+	}
+	// Also backfill DefaultID if it's missing but channels exist.
+	if cfg.DefaultID == "" && len(cfg.Channels) > 0 {
+		cfg.DefaultID = cfg.Channels[0].ID
+		needsSave = true
+	}
+	if needsSave {
+		// Best-effort: don't return an error if the backfill write fails
+		// (e.g. read-only filesystem), just return the in-memory config.
+		_ = Save(dataDir, cfg)
+	}
 	return cfg, nil
 }
 
 // Save marshals cfg to JSON and writes it atomically to dataDir/alert_config.json.
 // The file is created with permission 0600 so only the owning user can read
 // the webhook URLs and bot tokens stored inside.
+// Save assigns IDs to any channel entry that is missing one before writing.
 func Save(dataDir string, cfg AlertConfig) error {
+	// Assign IDs to any channel that doesn't have one yet.
+	for i := range cfg.Channels {
+		if cfg.Channels[i].ID == "" {
+			id, err := GenerateChannelID()
+			if err != nil {
+				return fmt.Errorf("assign channel ID: %w", err)
+			}
+			cfg.Channels[i].ID = id
+		}
+	}
+	// Ensure DefaultID is set when channels exist.
+	if cfg.DefaultID == "" && len(cfg.Channels) > 0 {
+		cfg.DefaultID = cfg.Channels[0].ID
+	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal alert config: %w", err)

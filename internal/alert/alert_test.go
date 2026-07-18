@@ -603,3 +603,245 @@ func TestNewAlerter_UnknownType(t *testing.T) {
 		t.Error("unknown type should not return ErrMisconfigured")
 	}
 }
+
+// ----------------------------------------------------------------------------
+// GenerateChannelID
+// ----------------------------------------------------------------------------
+
+func TestGenerateChannelID_Format(t *testing.T) {
+	id, err := GenerateChannelID()
+	if err != nil {
+		t.Fatalf("GenerateChannelID() error: %v", err)
+	}
+	if len(id) != 16 {
+		t.Errorf("GenerateChannelID() len = %d; want 16 hex chars", len(id))
+	}
+	for _, c := range id {
+		if !('0' <= c && c <= '9') && !('a' <= c && c <= 'f') {
+			t.Errorf("GenerateChannelID() contains non-hex char %q", c)
+		}
+	}
+}
+
+func TestGenerateChannelID_Unique(t *testing.T) {
+	seen := make(map[string]bool)
+	for i := 0; i < 100; i++ {
+		id, err := GenerateChannelID()
+		if err != nil {
+			t.Fatalf("iteration %d: %v", i, err)
+		}
+		if seen[id] {
+			t.Fatalf("duplicate ID generated: %q", id)
+		}
+		seen[id] = true
+	}
+}
+
+// ----------------------------------------------------------------------------
+// ResolveChannel
+// ----------------------------------------------------------------------------
+
+func TestResolveChannel_Found(t *testing.T) {
+	cfg := AlertConfig{
+		Channels: []ChannelConfig{
+			{ID: "aabbccdd11223344", Type: ChannelDiscord, WebhookURL: "https://example.com"},
+		},
+	}
+	ch, ok := cfg.ResolveChannel("aabbccdd11223344")
+	if !ok {
+		t.Fatal("ResolveChannel: expected found, got not found")
+	}
+	if ch.Type != ChannelDiscord {
+		t.Errorf("ResolveChannel: Type = %q; want %q", ch.Type, ChannelDiscord)
+	}
+}
+
+func TestResolveChannel_NotFound(t *testing.T) {
+	cfg := AlertConfig{
+		Channels: []ChannelConfig{
+			{ID: "aabbccdd11223344", Type: ChannelDiscord, WebhookURL: "https://example.com"},
+		},
+	}
+	_, ok := cfg.ResolveChannel("deadbeefdeadbeef")
+	if ok {
+		t.Fatal("ResolveChannel: expected not found, got found")
+	}
+}
+
+func TestResolveChannel_EmptyID(t *testing.T) {
+	cfg := AlertConfig{
+		Channels: []ChannelConfig{
+			{ID: "aabbccdd11223344", Type: ChannelDiscord, WebhookURL: "https://example.com"},
+		},
+	}
+	_, ok := cfg.ResolveChannel("")
+	if ok {
+		t.Fatal("ResolveChannel with empty ID should return not found")
+	}
+}
+
+// ----------------------------------------------------------------------------
+// ChannelForToken
+// ----------------------------------------------------------------------------
+
+func TestChannelForToken_AssignedFound(t *testing.T) {
+	cfg := AlertConfig{
+		Channels: []ChannelConfig{
+			{ID: "id1", Type: ChannelDiscord, WebhookURL: "https://discord.example"},
+			{ID: "id2", Type: ChannelSlack, WebhookURL: "https://slack.example"},
+		},
+		DefaultID: "id1",
+	}
+	ch, ok := cfg.ChannelForToken("id2")
+	if !ok {
+		t.Fatal("ChannelForToken: expected found, got not found")
+	}
+	if ch.Type != ChannelSlack {
+		t.Errorf("ChannelForToken: Type = %q; want Slack", ch.Type)
+	}
+}
+
+func TestChannelForToken_FallsBackToDefault(t *testing.T) {
+	cfg := AlertConfig{
+		Channels: []ChannelConfig{
+			{ID: "id1", Type: ChannelDiscord, WebhookURL: "https://discord.example"},
+		},
+		DefaultID: "id1",
+	}
+	// Empty token channel ID → use default.
+	ch, ok := cfg.ChannelForToken("")
+	if !ok {
+		t.Fatal("ChannelForToken with empty ID should return default")
+	}
+	if ch.Type != ChannelDiscord {
+		t.Errorf("ChannelForToken: Type = %q; want Discord", ch.Type)
+	}
+}
+
+func TestChannelForToken_DeletedAssignmentFallsBackToDefault(t *testing.T) {
+	cfg := AlertConfig{
+		Channels: []ChannelConfig{
+			{ID: "id1", Type: ChannelDiscord, WebhookURL: "https://discord.example"},
+		},
+		DefaultID: "id1",
+	}
+	// Stale ID (channel was deleted) → fall back to default silently.
+	ch, ok := cfg.ChannelForToken("stale-deleted-id")
+	if !ok {
+		t.Fatal("ChannelForToken with stale ID should fall back to default, not return not-found")
+	}
+	if ch.Type != ChannelDiscord {
+		t.Errorf("ChannelForToken: Type = %q; want Discord (default)", ch.Type)
+	}
+}
+
+func TestChannelForToken_NoChannels(t *testing.T) {
+	cfg := AlertConfig{}
+	_, ok := cfg.ChannelForToken("")
+	if ok {
+		t.Fatal("ChannelForToken with no channels should return not found")
+	}
+}
+
+// ----------------------------------------------------------------------------
+// Save backfill and Load backfill
+// ----------------------------------------------------------------------------
+
+func TestSave_BackfillsIDsForNewChannels(t *testing.T) {
+	dir := t.TempDir()
+	// Channel has no ID — Save must assign one.
+	cfg := AlertConfig{
+		Channels: []ChannelConfig{
+			{Type: ChannelDiscord, WebhookURL: "https://discord.example"},
+		},
+	}
+	if err := Save(dir, cfg); err != nil {
+		t.Fatalf("Save() error: %v", err)
+	}
+	loaded, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if len(loaded.Channels) == 0 {
+		t.Fatal("expected 1 channel")
+	}
+	if loaded.Channels[0].ID == "" {
+		t.Error("Save() did not assign an ID to the channel")
+	}
+	if len(loaded.Channels[0].ID) != 16 {
+		t.Errorf("ID length = %d; want 16", len(loaded.Channels[0].ID))
+	}
+	if loaded.DefaultID == "" {
+		t.Error("Save() did not set DefaultID")
+	}
+}
+
+func TestLoad_BackfillsLegacyConfigWithoutIDs(t *testing.T) {
+	dir := t.TempDir()
+	// Write a legacy JSON file with no ID fields.
+	legacyJSON := `{"channels":[{"type":"discord","webhook_url":"https://discord.example"}],"default_index":0}`
+	path := dir + "/alert_config.json"
+	if err := os.WriteFile(path, []byte(legacyJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if len(cfg.Channels) == 0 {
+		t.Fatal("expected 1 channel")
+	}
+	if cfg.Channels[0].ID == "" {
+		t.Error("Load() did not backfill ID for legacy channel")
+	}
+	if cfg.DefaultID == "" {
+		t.Error("Load() did not set DefaultID from backfill")
+	}
+	// Verify it was also persisted to disk.
+	reloaded, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.Channels[0].ID != cfg.Channels[0].ID {
+		t.Error("backfill IDs not consistent between load calls")
+	}
+}
+
+func TestMultiChannel_RoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	cfg := AlertConfig{
+		Channels: []ChannelConfig{
+			{Type: ChannelDiscord, WebhookURL: "https://discord.example"},
+			{Type: ChannelSlack, WebhookURL: "https://slack.example"},
+		},
+	}
+	if err := Save(dir, cfg); err != nil {
+		t.Fatalf("Save() error: %v", err)
+	}
+	loaded, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if len(loaded.Channels) != 2 {
+		t.Fatalf("expected 2 channels, got %d", len(loaded.Channels))
+	}
+	// Both channels must have distinct non-empty IDs.
+	if loaded.Channels[0].ID == "" || loaded.Channels[1].ID == "" {
+		t.Error("channels missing IDs after round-trip")
+	}
+	if loaded.Channels[0].ID == loaded.Channels[1].ID {
+		t.Error("channels have duplicate IDs")
+	}
+	// DefaultID must reference one of the channel IDs.
+	found := false
+	for _, ch := range loaded.Channels {
+		if ch.ID == loaded.DefaultID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("DefaultID %q does not match any channel ID", loaded.DefaultID)
+	}
+}
+

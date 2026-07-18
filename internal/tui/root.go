@@ -76,7 +76,7 @@ func NewRootModel(isFirstRun bool, width, height int, st *store.Store, dataDir s
 		mainMenu:    NewMainMenuModel(width, height),
 		generate:    NewGenerateModel(width, height, st),
 		deploy:      NewDeployModel(width, height, st),
-		tokenList:   NewTokenListModel(width, height, st),
+		tokenList:   NewTokenListModel(width, height, st, dataDir),
 		alertScreen: NewAlertModel(width, height, dataDir),
 		help:        NewHelpModel(width, height),
 		width:       width,

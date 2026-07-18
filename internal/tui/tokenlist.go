@@ -7,6 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/arjunjaincs/decoyd/internal/alert"
 	"github.com/arjunjaincs/decoyd/internal/store"
 	"github.com/arjunjaincs/decoyd/internal/tokens"
 )
@@ -25,9 +26,10 @@ type TokenListDoneMsg struct{}
 type tokenListState int
 
 const (
-	tokenListStateBrowse  tokenListState = iota // browsing the list
-	tokenListStateConfDel                       // confirming a delete
-	tokenListStateEdit                          // editing the Notes field of the selected token
+	tokenListStateBrowse   tokenListState = iota // browsing the list
+	tokenListStateConfDel                        // confirming a delete
+	tokenListStateEdit                           // editing the Notes field
+	tokenListStateAssign                         // picking an alert channel
 )
 
 // ----------------------------------------------------------------------------
@@ -38,7 +40,8 @@ const (
 type TokenListModel struct {
 	width  int
 	height int
-	st     *store.Store
+	st      *store.Store
+	dataDir string // for loading alert config
 	all    []tokens.Token
 	cursor int
 	state  tokenListState
@@ -46,11 +49,14 @@ type TokenListModel struct {
 	// Edit state — holds the in-progress rune buffer for the Notes field.
 	editBuf []rune
 	editPos int
+	// Assign state — channel picker.
+	alertCfg    alert.AlertConfig // refreshed when entering assign state
+	assignCursor int              // cursor within channel picker
 }
 
 // NewTokenListModel creates a fresh model, loading all tokens from the store.
-func NewTokenListModel(width, height int, st *store.Store) TokenListModel {
-	m := TokenListModel{width: width, height: height, st: st}
+func NewTokenListModel(width, height int, st *store.Store, dataDir string) TokenListModel {
+	m := TokenListModel{width: width, height: height, st: st, dataDir: dataDir}
 	m.reload()
 	return m
 }
@@ -85,6 +91,8 @@ func (m TokenListModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateConfirmDelete(msg)
 		case tokenListStateEdit:
 			return m.updateEdit(msg)
+		case tokenListStateAssign:
+			return m.updateAssign(msg)
 		}
 	}
 	return m, nil
@@ -111,6 +119,17 @@ func (m TokenListModel) updateBrowse(msg tea.KeyMsg) (TokenListModel, tea.Cmd) {
 			m.editBuf = []rune(m.all[m.cursor].Notes)
 			m.editPos = len(m.editBuf)
 			m.state = tokenListStateEdit
+		}
+	case "a":
+		if len(m.all) > 0 {
+			// Refresh alert config before opening picker.
+			if m.dataDir != "" {
+				if cfg, err := alert.Load(m.dataDir); err == nil {
+					m.alertCfg = cfg
+				}
+			}
+			m.assignCursor = 0
+			m.state = tokenListStateAssign
 		}
 	case "esc":
 		return m, func() tea.Msg { return TokenListDoneMsg{} }
@@ -230,6 +249,9 @@ func (m TokenListModel) View() string {
 	if m.state == tokenListStateEdit && len(m.all) > 0 {
 		return m.viewEdit(boxW)
 	}
+	if m.state == tokenListStateAssign && len(m.all) > 0 {
+		return m.viewAssign(boxW)
+	}
 
 	return m.viewTable(boxW)
 }
@@ -311,7 +333,7 @@ func (m TokenListModel) viewTable(boxW int) string {
 	}
 
 	box := renderBoxInner("Deployed Tokens", sb.String(), boxW, ColorBorder)
-	footer := HelpTextStyle.Render("↑/↓ browse   d delete   e edit notes   esc back")
+	footer := HelpTextStyle.Render("↑/↓ browse   d delete   e edit notes   a assign channel   esc back")
 	return lipgloss.JoinVertical(lipgloss.Left, box, footer)
 }
 
@@ -368,3 +390,113 @@ func truncate(s string, n int) string {
 	}
 	return string(runes[:n-1]) + "…"
 }
+
+// ----------------------------------------------------------------------------
+// Assign channel state
+// ----------------------------------------------------------------------------
+
+// assignOptions returns the channel picker options for the current token.
+// Index 0 is always "Remove assignment (use default)".
+// Remaining entries are from alertCfg.Channels.
+func (m TokenListModel) assignOptions() []string {
+	opts := []string{"Remove assignment (use default)"}
+	for _, ch := range m.alertCfg.Channels {
+		label := ch.Label
+		if label == "" {
+			label = ch.Type
+		}
+		suffix := ""
+		if ch.ID == m.alertCfg.DefaultID {
+			suffix += " ★"
+		}
+		if len(m.all) > 0 && ch.ID == m.all[m.cursor].AlertChannelID {
+			suffix += " ✓"
+		}
+		opts = append(opts, label+suffix)
+	}
+	return opts
+}
+
+func (m TokenListModel) updateAssign(msg tea.KeyMsg) (TokenListModel, tea.Cmd) {
+	opts := m.assignOptions()
+	maxIdx := len(opts) - 1
+	switch msg.String() {
+	case "up", "k":
+		if m.assignCursor > 0 {
+			m.assignCursor--
+		}
+	case "down", "j":
+		if m.assignCursor < maxIdx {
+			m.assignCursor++
+		}
+	case "enter":
+		if len(m.all) == 0 {
+			m.state = tokenListStateBrowse
+			return m, nil
+		}
+		tok := m.all[m.cursor]
+		if m.assignCursor == 0 {
+			// Remove assignment.
+			tok.AlertChannelID = ""
+		} else {
+			chIdx := m.assignCursor - 1
+			if chIdx < len(m.alertCfg.Channels) {
+				tok.AlertChannelID = m.alertCfg.Channels[chIdx].ID
+			}
+		}
+		var err error
+		if m.st != nil {
+			err = m.st.UpdateToken(tok)
+		}
+		if err != nil {
+			m.notice = ErrorStyle.Render("Assign failed: " + err.Error())
+		} else {
+			m.notice = lipgloss.NewStyle().Foreground(ColorPrimary).Render(
+				fmt.Sprintf("Channel assignment updated for %s", tok.ID))
+		}
+		m.reload()
+		m.state = tokenListStateBrowse
+	case "esc":
+		m.state = tokenListStateBrowse
+	}
+	return m, nil
+}
+
+func (m TokenListModel) viewAssign(boxW int) string {
+	if len(m.all) == 0 {
+		m.state = tokenListStateBrowse
+		return m.viewTable(boxW)
+	}
+	tok := m.all[m.cursor]
+	opts := m.assignOptions()
+
+	var sb strings.Builder
+	sb.WriteString(MutedStyle.Render(fmt.Sprintf("  Token: %s (%s)", tok.ID, tok.Type)) + "\n\n")
+
+	if len(m.alertCfg.Channels) == 0 {
+		sb.WriteString(MutedStyle.Render("  No alert channels configured yet.\n"))
+		sb.WriteString(MutedStyle.Render("  Configure channels in Alert Settings first."))
+		box := renderBoxInner("Assign Alert Channel", sb.String(), boxW, ColorBorder)
+		footer := HelpTextStyle.Render("esc back")
+		return lipgloss.JoinVertical(lipgloss.Left, box, footer)
+	}
+
+	for i, opt := range opts {
+		marker := "  "
+		if i == m.assignCursor {
+			marker = "▸ "
+		}
+		line := marker + opt
+		if i == m.assignCursor {
+			sb.WriteString(SelectedItemStyle().Render(line) + "\n")
+		} else {
+			sb.WriteString(NormalItemStyle.Render(line) + "\n")
+		}
+	}
+
+	content := strings.TrimRight(sb.String(), "\n")
+	box := renderBoxInner("Assign Alert Channel", content, boxW, ColorPrimary)
+	footer := HelpTextStyle.Render("↑/↓ choose   enter confirm   esc cancel   ★ = default   ✓ = current")
+	return lipgloss.JoinVertical(lipgloss.Left, box, footer)
+}
+

@@ -32,9 +32,11 @@ type alertTestResultMsg struct {
 type alertState int
 
 const (
-	alertStateForm        alertState = iota // user is filling in the form
-	alertStateSending                       // test-send in progress
-	alertStateDone                          // showing result (success or error)
+	alertStateList          alertState = iota // channel list (entry point when channels exist)
+	alertStateConfirmDelete                   // confirm before deleting a channel
+	alertStateForm                            // form: add or edit one channel
+	alertStateSending                         // test-send in progress
+	alertStateDone                            // showing result (success or error)
 )
 
 // ----------------------------------------------------------------------------
@@ -60,7 +62,14 @@ type AlertModel struct {
 	height  int
 	dataDir string // path to the data directory, for Load/Save
 
-	// channel selector
+	// List state.
+	listCursor int // cursor within channel list
+
+	// editingID tracks which channel is being edited (empty = adding a new channel).
+	// Used by autosaveCredentials / doTestSend to update the correct record.
+	editingID string
+
+	// channel selector (form state)
 	channelIdx int // index into alert.Channels
 
 	// savedChannels caches the last-used ChannelConfig for each channel type
@@ -113,18 +122,18 @@ func NewAlertModel(width, height int, dataDir string) AlertModel {
 		height:        height,
 		dataDir:       dataDir,
 		savedChannels: make(map[string]alert.ChannelConfig),
+		state:         alertStateForm, // default for empty config
 	}
 	// Pre-populate from saved config if available.
-	// All saved channel configs are loaded into the in-memory cache so that
-	// cycling between channel types within a session always restores the
-	// correct credentials for each type.
 	cfg, err := alert.Load(dataDir)
 	if err == nil {
 		for _, ch := range cfg.Channels {
 			m.savedChannels[ch.Type] = ch
 		}
 		if len(cfg.Channels) > 0 {
-			ch := cfg.Channels[cfg.DefaultIndex]
+			// Channels exist: start on the list screen.
+			m.state = alertStateList
+			ch, _ := cfg.DefaultChannel()
 			for i, c := range alert.Channels {
 				if c.Type == ch.Type {
 					m.channelIdx = i
@@ -292,6 +301,10 @@ func (m AlertModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	switch m.state {
+	case alertStateList:
+		return m.updateList(msg)
+	case alertStateConfirmDelete:
+		return m.updateConfirmDeleteChannel(msg)
 	case alertStateForm:
 		return m.updateForm(msg)
 	case alertStateDone:
@@ -433,12 +446,32 @@ func (m *AlertModel) autosaveCredentials() {
 	}
 	m.savedChannels[cfg.Type] = cfg
 	if m.dataDir != "" {
-		alertCfg := alert.AlertConfig{
-			Channels:     []alert.ChannelConfig{cfg},
-			DefaultIndex: 0,
-		}
-		_ = alert.Save(m.dataDir, alertCfg)
+		existing, _ := alert.Load(m.dataDir)
+		existing = m.upsertChannel(existing, cfg)
+		_ = alert.Save(m.dataDir, existing)
 	}
+}
+
+// upsertChannel inserts or updates cfg in alertCfg based on editingID.
+// When editingID is empty, cfg is appended as a new entry.
+// When editingID is set, the existing entry with that ID is replaced.
+func (m *AlertModel) upsertChannel(alertCfg alert.AlertConfig, cfg alert.ChannelConfig) alert.AlertConfig {
+	if m.editingID == "" {
+		// New channel: append.
+		alertCfg.Channels = append(alertCfg.Channels, cfg)
+		return alertCfg
+	}
+	// Edit: replace the matching entry, preserve its ID.
+	cfg.ID = m.editingID
+	for i, ch := range alertCfg.Channels {
+		if ch.ID == m.editingID {
+			alertCfg.Channels[i] = cfg
+			return alertCfg
+		}
+	}
+	// editingID not found (stale): append as new.
+	alertCfg.Channels = append(alertCfg.Channels, cfg)
+	return alertCfg
 }
 
 // doTestSend validates the form and fires an async test-send.
@@ -488,11 +521,9 @@ func (m AlertModel) doTestSend() (AlertModel, tea.Cmd) {
 
 	// Persist to disk so the config survives a restart.
 	if m.dataDir != "" {
-		alertCfg := alert.AlertConfig{
-			Channels:     []alert.ChannelConfig{cfg},
-			DefaultIndex: 0,
-		}
-		_ = alert.Save(m.dataDir, alertCfg)
+		existing, _ := alert.Load(m.dataDir)
+		existing = m.upsertChannel(existing, cfg)
+		_ = alert.Save(m.dataDir, existing)
 	}
 
 	m.state = alertStateSending
@@ -562,6 +593,10 @@ func handleTextInput(buf []rune, pos int, km tea.KeyMsg) ([]rune, int) {
 
 func (m AlertModel) View() string {
 	switch m.state {
+	case alertStateList:
+		return m.viewList()
+	case alertStateConfirmDelete:
+		return m.viewConfirmDeleteChannel()
 	case alertStateSending:
 		return m.viewSending()
 	case alertStateDone:
@@ -674,3 +709,192 @@ func (m AlertModel) viewDone() string {
 	content += "\n\n" + MutedStyle.Render("press any key to continue")
 	return RenderBox("Alert Settings", content, m.width)
 }
+
+// ----------------------------------------------------------------------------
+// List state — multi-channel management
+// ----------------------------------------------------------------------------
+
+func (m AlertModel) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
+	km, ok := msg.(tea.KeyMsg)
+	if !ok {
+		return m, nil
+	}
+	cfg, _ := alert.Load(m.dataDir)
+	channels := cfg.Channels
+	switch km.String() {
+	case "up", "k":
+		if m.listCursor > 0 {
+			m.listCursor--
+		}
+	case "down", "j":
+		if m.listCursor < len(channels)-1 {
+			m.listCursor++
+		}
+	case "a":
+		// Add new channel — open blank form.
+		m.editingID = ""
+		m.primaryBuf = nil
+		m.primaryPos = 0
+		m.secondaryBuf = nil
+		m.secondaryPos = 0
+		m.channelIdx = 0
+		m.fieldCursor = alertFieldChannel
+		m.state = alertStateForm
+	case "enter":
+		// Edit selected channel — pre-populate form.
+		if len(channels) > 0 && m.listCursor < len(channels) {
+			ch := channels[m.listCursor]
+			m.editingID = ch.ID
+			// Set channelIdx to match channel type.
+			for i, c := range alert.Channels {
+				if c.Type == ch.Type {
+					m.channelIdx = i
+					break
+				}
+			}
+			// Pre-populate fields.
+			m.primaryBuf = nil
+			m.primaryPos = 0
+			m.secondaryBuf = nil
+			m.secondaryPos = 0
+			switch ch.Type {
+			case alert.ChannelTelegram:
+				m.primaryBuf = []rune(ch.BotToken)
+				m.primaryPos = len(m.primaryBuf)
+				m.secondaryBuf = []rune(ch.ChatID)
+				m.secondaryPos = len(m.secondaryBuf)
+			case alert.ChannelNtfy:
+				srv := ch.ServerURL
+				if srv == "" {
+					srv = "https://ntfy.sh"
+				}
+				m.primaryBuf = []rune(srv)
+				m.primaryPos = len(m.primaryBuf)
+				m.secondaryBuf = []rune(ch.Topic)
+				m.secondaryPos = len(m.secondaryBuf)
+			default:
+				m.primaryBuf = []rune(ch.WebhookURL)
+				m.primaryPos = len(m.primaryBuf)
+			}
+			m.fieldCursor = alertFieldPrimary
+			m.state = alertStateForm
+		}
+	case "d":
+		if len(channels) > 0 {
+			m.state = alertStateConfirmDelete
+		}
+	case "s":
+		// Set selected as default.
+		if len(channels) > 0 && m.listCursor < len(channels) {
+			cfg.DefaultID = channels[m.listCursor].ID
+			_ = alert.Save(m.dataDir, cfg)
+		}
+	case "esc":
+		return m, func() tea.Msg { return AlertScreenDoneMsg{} }
+	}
+	return m, nil
+}
+
+func (m AlertModel) updateConfirmDeleteChannel(msg tea.Msg) (tea.Model, tea.Cmd) {
+	km, ok := msg.(tea.KeyMsg)
+	if !ok {
+		return m, nil
+	}
+	switch km.String() {
+	case "y", "enter":
+		cfg, err := alert.Load(m.dataDir)
+		if err == nil && m.listCursor < len(cfg.Channels) {
+			deletedID := cfg.Channels[m.listCursor].ID
+			cfg.Channels = append(cfg.Channels[:m.listCursor], cfg.Channels[m.listCursor+1:]...)
+			// If deleted channel was the default, reset to first (Save will fix it).
+			if cfg.DefaultID == deletedID {
+				cfg.DefaultID = ""
+			}
+			_ = alert.Save(m.dataDir, cfg)
+			if m.listCursor > 0 && m.listCursor >= len(cfg.Channels) {
+				m.listCursor = len(cfg.Channels) - 1
+			}
+		}
+		// If no channels left, go back to form.
+		cfg2, _ := alert.Load(m.dataDir)
+		if len(cfg2.Channels) == 0 {
+			m.state = alertStateForm
+		} else {
+			m.state = alertStateList
+		}
+	case "n", "esc":
+		m.state = alertStateList
+	}
+	return m, nil
+}
+
+func (m AlertModel) viewList() string {
+	cfg, _ := alert.Load(m.dataDir)
+	channels := cfg.Channels
+
+	var sb strings.Builder
+	if len(channels) == 0 {
+		sb.WriteString(MutedStyle.Render("  No channels configured. Press 'a' to add one."))
+	} else {
+		for i, ch := range channels {
+			label := ch.Label
+			if label == "" {
+				label = ch.Type
+			}
+			suffix := ""
+			if ch.ID == cfg.DefaultID {
+				suffix += " ★"
+			}
+			marker := "  "
+			if i == m.listCursor {
+				marker = "▸ "
+			}
+			line := fmt.Sprintf("%s%-20s  %s%s", marker, label, ch.Type, suffix)
+			if i == m.listCursor {
+				sb.WriteString(SelectedItemStyle().Render(line) + "\n")
+			} else {
+				sb.WriteString(NormalItemStyle.Render(line) + "\n")
+			}
+		}
+	}
+
+	content := strings.TrimRight(sb.String(), "\n")
+	help := HelpTextStyle.Render("↑/↓ browse   enter edit   a add   d delete   s set default   esc back   ★ = default")
+	return lipgloss.JoinVertical(lipgloss.Left,
+		RenderBox("Alert Channels", content, m.width),
+		help,
+	)
+}
+
+func (m AlertModel) viewConfirmDeleteChannel() string {
+	cfg, _ := alert.Load(m.dataDir)
+	if m.listCursor >= len(cfg.Channels) {
+		m.state = alertStateList
+		return m.viewList()
+	}
+	ch := cfg.Channels[m.listCursor]
+	label := ch.Label
+	if label == "" {
+		label = ch.Type
+	}
+
+	var sb strings.Builder
+	sb.WriteString(WarningStyle.Render("  Delete this alert channel?") + "\n\n")
+	sb.WriteString(MutedStyle.Render("  Label: ") + NormalItemStyle.Render(label) + "\n")
+	sb.WriteString(MutedStyle.Render("  Type:  ") + NormalItemStyle.Render(ch.Type) + "\n")
+	if ch.ID == cfg.DefaultID {
+		sb.WriteString("\n" + MutedStyle.Render("  Note: this is the default channel. Another will be promoted.") + "\n")
+	}
+
+	content := strings.TrimRight(sb.String(), "\n")
+	help := HelpTextStyle.Render("y/enter confirm   n/esc cancel")
+	boxW := m.width - 2
+	if boxW < 10 {
+		boxW = 10
+	}
+	return lipgloss.JoinVertical(lipgloss.Left,
+		renderBoxInner("Delete Channel", content, boxW, ColorDanger),
+		help,
+	)
+}
+
