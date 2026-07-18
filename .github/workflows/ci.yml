@@ -67,6 +67,17 @@ jobs:
           CGO_ENABLED: "0"
         run: go build ./...
 
+      - name: Build cmd/decoyd explicitly (catches silent .gitignore exclusions)
+        # go build ./... expands against the checkout working tree, so a directory
+        # silently excluded from git (e.g. by an unanchored .gitignore pattern) will
+        # not appear in the tree and will be skipped without error. This step names
+        # cmd/decoyd directly so a missing or broken entry point always fails CI.
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: go build -o "${{ runner.temp }}/decoyd-probe" ./cmd/decoyd
+
       - name: Test (native only — ${{ matrix.os }})
         # Tests run native; cross-compiled binaries can't be executed here.
         # We run tests only when goos matches the runner's OS.

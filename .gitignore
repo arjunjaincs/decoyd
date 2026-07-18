@@ -1,6 +1,6 @@
-# Binaries
-decoyd
-decoyd.exe
+# Binaries — anchored to repo root so cmd/decoyd/ is NOT excluded
+/decoyd
+/decoyd.exe
 *.exe
 
 # Go build artifacts
