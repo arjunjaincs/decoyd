@@ -46,6 +46,12 @@ func cmdInstall(dataDir string) error {
 	}
 	unitPath := filepath.Join(unitDir, "decoyd.service")
 
+	// #nosec G304 G703 -- unitPath is filepath.Join(HOME, ".config/systemd/user/decoyd.service"):
+	// the only variable component is HOME, which is set by the login shell of the
+	// owning user — the same user who runs 'decoyd install' to install a service for
+	// themselves. An attacker who can control HOME already has direct write access to
+	// ~/.config/systemd/user/ without decoyd's involvement. The filename component
+	// ("decoyd.service") is a hardcoded constant.
 	f, err := os.OpenFile(unitPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return fmt.Errorf("write unit file: %w", err)
