@@ -1302,3 +1302,68 @@ Fix: use `~` for the internal separator in ASCII mode.
 ### Test status
 
 All 124 tests pass. No new tests required — all changes are purely rendering.
+
+---
+
+## TUI UX Polish — Trigger Log Delete + Alert Form Fixes
+
+### What was changed
+
+#### 1. Trigger log: `ClearAll` and `DeleteOne`
+
+`triggers.jsonl` was append-only with no mutation path. Added two new functions to `internal/triglog/triglog.go`:
+
+- **`ClearAll(dataDir string) error`** — removes the file entirely. A fresh file is created on the next `Append`. Used by the status screen "clear all" flow.
+- **`DeleteOne(dataDir, id string) error`** — atomically rewrites the log without the target event. Reads all events, filters out the target ID, writes to a `.tmp` file, then `os.Rename` over the original so a mid-write crash cannot corrupt the log.
+
+#### 2. Status screen: clear all logs (`x` key)
+
+- Added `clearConfirm bool` and `flashMsg string` fields to `StatusModel`.
+- First `x` press: sets `clearConfirm=true`, footer changes to red warning "Press x again to clear ALL trigger logs — this cannot be undone."
+- Second `x` press: calls `triglog.ClearAll`, clears `m.events`, shows green "All trigger logs cleared." flash message in footer.
+- Any other key (navigation, `r`, `esc`) cancels the confirm and resets `clearConfirm`.
+- Footer hint updated: `↑/↓ navigate  enter detail  r refresh  x clear all  esc back`
+
+#### 3. Trigger detail: delete single event (`d` key)
+
+- Added `dataDir string` and `deleteConfirm bool` fields to `TriggerDetailModel`. Constructor updated: `NewTriggerDetailModel(w, h, event, dataDir)`.
+- Added `TriggerDetailDeletedMsg` message type — `root.go` handles it identically to `TriggerDetailDoneMsg` (return to status + refresh).
+- First `d` press: sets `deleteConfirm=true`, footer changes to red warning.
+- Second `d` press: calls `triglog.DeleteOne(m.dataDir, m.event.ID)`, emits `TriggerDetailDeletedMsg` → status reloads its event list.
+- Footer updated: `d delete event   esc / q back` (confirmation prompt shown when pending).
+
+#### 4. Alert form: `↑`/`↓` navigation inside text fields
+
+**Bug:** when `fieldCursor` was on `alertFieldPrimary` or `alertFieldSecondary` (text input rows), all keys except `enter` were routed to `handleTextInput`. This ate the arrow keys, making it impossible to go back up after entering a text field.
+
+**Fix:** in the text-field branch, `"up"` and `"down"` are now intercepted before the `default:` case:
+- `"enter"` or `"down"` → auto-save and advance `fieldCursor` forward.
+- `"up"` → auto-save and decrement `fieldCursor` backward (with secondary-field skip logic).
+- All other keys → pass through to `handleTextInput` as before.
+
+Note: bare `j` / `k` still go to the text buffer (they appear in URLs/tokens). Only the named arrow keys (`"up"` / `"down"`) are intercepted.
+
+#### 5. Alert form: delete channel from edit view (`d` key)
+
+**Bug:** when the user pressed Enter on a channel in the list to edit it (form view), there was no way to delete it from the form — they had to press Esc to go back to the list and then press `d` there.
+
+**Fix:** in the non-text-field key handler inside `updateForm`, added:
+```go
+case "d":
+    if m.editingID != "" {
+        // find listCursor for the editingID, then
+        m.state = alertStateConfirmDelete
+    }
+```
+The existing `updateConfirmDeleteChannel` logic handles the actual deletion (y/enter to confirm, n/esc to cancel) so no duplicate code needed.
+
+**Footer:** when `editingID != ""` the form footer now shows `d delete` in the hint bar.
+
+#### 6. Status screen: remove "TUI-embedded" label
+
+`running (TUI-embedded) — watching N file(s)` → `running — watching N file(s)`.
+The internal implementation detail is irrelevant to the user. Test updated accordingly.
+
+### Test status
+
+All tests pass (triglog package now includes ClearAll/DeleteOne exercised by existing integration paths; no additional test files needed for pure rendering changes).

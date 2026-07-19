@@ -48,9 +48,11 @@ type StatusModel struct {
 	// Nil means the TUI does not own the watcher (headless or not-running case).
 	WatcherRef *watch.Watcher
 
-	events  []triglog.TriggerEvent
-	cursor  int
-	loadErr string
+	events       []triglog.TriggerEvent
+	cursor       int
+	loadErr      string
+	clearConfirm bool   // true after first 'x' press; second 'x' commits the clear
+	flashMsg     string // transient one-liner shown at the bottom after an action
 }
 
 const maxStatusEvents = 50
@@ -128,28 +130,52 @@ func (m StatusModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "esc":
+			m.clearConfirm = false
 			return m, func() tea.Msg { return StatusDoneMsg{} }
 
 		case "r", "R":
+			m.clearConfirm = false
+			m.flashMsg = ""
 			return m, m.loadCmd()
 
 		case "up", "k":
+			m.clearConfirm = false
 			if m.cursor > 0 {
 				m.cursor--
 			}
 			return m, nil
 
 		case "down", "j":
+			m.clearConfirm = false
 			if m.cursor < len(m.events)-1 {
 				m.cursor++
 			}
 			return m, nil
 
 		case "enter":
+			m.clearConfirm = false
 			if len(m.events) > 0 && m.cursor < len(m.events) {
 				return m, func() tea.Msg {
 					return ShowTriggerDetailMsg{Event: m.events[m.cursor]}
 				}
+			}
+			return m, nil
+
+		case "x", "X":
+			if len(m.events) == 0 {
+				return m, nil
+			}
+			if !m.clearConfirm {
+				// First press: ask for confirmation.
+				m.clearConfirm = true
+				m.flashMsg = ""
+			} else {
+				// Second press: commit the clear.
+				m.clearConfirm = false
+				_ = triglog.ClearAll(m.dataDir)
+				m.events = nil
+				m.cursor = 0
+				m.flashMsg = "All trigger logs cleared."
 			}
 			return m, nil
 		}
@@ -185,7 +211,15 @@ func (m StatusModel) View() string {
 	}
 
 	b.WriteString("\n")
-	b.WriteString(HelpTextStyle.Render(G.NavUp + "/" + G.NavDown + " navigate  enter detail  r refresh  esc back"))
+
+	// Footer: confirm-clear prompt overrides the normal hint bar.
+	if m.clearConfirm {
+		b.WriteString(WarningStyle.Render("Press x again to clear ALL trigger logs — this cannot be undone."))
+	} else if m.flashMsg != "" {
+		b.WriteString(SelectedItemStyle().Render(m.flashMsg))
+	} else {
+		b.WriteString(HelpTextStyle.Render(G.NavUp + "/" + G.NavDown + " navigate  enter detail  r refresh  x clear all  esc back"))
+	}
 
 	boxW := ScreenBoxWidth(m.width, 90)
 	box := renderBoxInner("Status / Triggers", b.String(), boxW, ColorBorder)
@@ -198,7 +232,7 @@ func (m StatusModel) watcherStatusLine() string {
 		// TUI-embedded: query the live watcher directly.
 		st := m.WatcherRef.Status()
 		if st.Running {
-			line := fmt.Sprintf("%s running (TUI-embedded) — watching %d file(s)", G.Bullet, st.Watching)
+			line := fmt.Sprintf("%s running — watching %d file(s)", G.Bullet, st.Watching)
 			return SelectedItemStyle().Render(line)
 		}
 		return WarningStyle.Render(G.Empty + " watcher stopped")

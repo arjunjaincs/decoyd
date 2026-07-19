@@ -18,6 +18,10 @@ import (
 // TriggerDetailDoneMsg is emitted when the user presses esc to return to Status.
 type TriggerDetailDoneMsg struct{}
 
+// TriggerDetailDeletedMsg is emitted after the event has been deleted from the
+// log. The status screen handles this by refreshing its event list.
+type TriggerDetailDeletedMsg struct{}
+
 // ----------------------------------------------------------------------------
 // TriggerDetailModel
 // ----------------------------------------------------------------------------
@@ -34,17 +38,20 @@ type TriggerDetailDoneMsg struct{}
 //   - Alert status with error text when status == failed
 //   - Full event ID (for correlation with triggers.jsonl)
 type TriggerDetailModel struct {
-	width  int
-	height int
-	event  triglog.TriggerEvent
+	width         int
+	height        int
+	event         triglog.TriggerEvent
+	dataDir       string
+	deleteConfirm bool // true after first 'd' press; second 'd' commits delete
 }
 
 // NewTriggerDetailModel constructs the detail model for the given event.
-func NewTriggerDetailModel(width, height int, event triglog.TriggerEvent) TriggerDetailModel {
+func NewTriggerDetailModel(width, height int, event triglog.TriggerEvent, dataDir string) TriggerDetailModel {
 	return TriggerDetailModel{
-		width:  width,
-		height: height,
-		event:  event,
+		width:   width,
+		height:  height,
+		event:   event,
+		dataDir: dataDir,
 	}
 }
 
@@ -65,7 +72,19 @@ func (m TriggerDetailModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "esc", "q":
+			m.deleteConfirm = false
 			return m, func() tea.Msg { return TriggerDetailDoneMsg{} }
+
+		case "d", "D":
+			if !m.deleteConfirm {
+				// First press: show confirmation in footer.
+				m.deleteConfirm = true
+			} else {
+				// Second press: commit the delete and return to status.
+				_ = triglog.DeleteOne(m.dataDir, m.event.ID)
+				return m, func() tea.Msg { return TriggerDetailDeletedMsg{} }
+			}
+			return m, nil
 		}
 	}
 	return m, nil
@@ -111,7 +130,11 @@ func (m TriggerDetailModel) View() string {
 	row("Event ID (full)", ev.ID)
 
 	b.WriteString("\n")
-	b.WriteString(HelpTextStyle.Render("esc / q  back to dashboard"))
+	if m.deleteConfirm {
+		b.WriteString(WarningStyle.Render("Press d again to delete this event from the log — cannot be undone."))
+	} else {
+		b.WriteString(HelpTextStyle.Render("d delete event   esc / q back"))
+	}
 
 	boxW := ScreenBoxWidth(m.width, 80)
 	box := renderBoxInner("Trigger Detail", b.String(), boxW, ColorBorder)

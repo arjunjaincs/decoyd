@@ -1,4 +1,4 @@
-﻿// Package triglog implements the append-only trigger event log (triggers.jsonl).
+// Package triglog implements the append-only trigger event log (triggers.jsonl).
 //
 // Design constraints:
 //   - Append-only: every trigger event is appended as a newline-delimited JSON
@@ -190,4 +190,89 @@ func LoadByToken(dataDir, tokenID string) ([]TriggerEvent, error) {
 		}
 	}
 	return out, nil
+}
+
+// ----------------------------------------------------------------------------
+// ClearAll — wipe the entire log
+// ----------------------------------------------------------------------------
+
+// ClearAll removes the trigger log file, effectively clearing all events.
+// A fresh file will be created on the next Append call.
+// Returns nil if the file did not exist.
+func ClearAll(dataDir string) error {
+	path := logPath(dataDir)
+	err := os.Remove(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("triglog clear: %w", err)
+	}
+	return nil
+}
+
+// ----------------------------------------------------------------------------
+// DeleteOne — remove a single event by ID
+// ----------------------------------------------------------------------------
+
+// DeleteOne rewrites dataDir/triggers.jsonl without any records whose ID
+// matches id. Because the file is append-only, this is the only way to
+// remove a record after the fact. The rewrite is atomic: a temp file is
+// written first and then renamed over the original so a crash mid-write
+// cannot corrupt the log.
+func DeleteOne(dataDir, id string) error {
+	if id == "" {
+		return nil
+	}
+	all, err := Load(dataDir)
+	if err != nil {
+		return err
+	}
+
+	// Filter out the target ID.
+	filtered := all[:0]
+	for _, te := range all {
+		if te.ID != id {
+			filtered = append(filtered, te)
+		}
+	}
+	if len(filtered) == len(all) {
+		return nil // nothing to do
+	}
+
+	// Write a temp file, then rename.
+	path := logPath(dataDir)
+	tmp := path + ".tmp"
+	// #nosec G304
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		return fmt.Errorf("triglog rewrite open: %w", err)
+	}
+
+	// Re-sort newest-first so the file order is deterministic.
+	sort.Slice(filtered, func(i, j int) bool {
+		return filtered[i].TriggeredAt.After(filtered[j].TriggeredAt)
+	})
+	for _, te := range filtered {
+		data, merr := json.Marshal(te)
+		if merr != nil {
+			_ = f.Close()
+			_ = os.Remove(tmp)
+			return fmt.Errorf("triglog rewrite marshal: %w", merr)
+		}
+		data = append(data, '\n')
+		if _, werr := f.Write(data); werr != nil {
+			_ = f.Close()
+			_ = os.Remove(tmp)
+			return fmt.Errorf("triglog rewrite write: %w", werr)
+		}
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("triglog rewrite close: %w", err)
+	}
+
+	// Atomic rename.
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("triglog rewrite rename: %w", err)
+	}
+	return nil
 }

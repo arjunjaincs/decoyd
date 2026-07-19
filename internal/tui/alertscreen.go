@@ -361,13 +361,17 @@ func (m AlertModel) updateForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// ── Text input fields: all other keys go into the buffer ──────────────
-	// Do NOT check j/k/s/down/up shortcuts here — those characters appear
-	// in URLs and tokens and would be eaten during a paste operation.
+	// ── Text input fields ─────────────────────────────────────────────────
+	// up/down/enter: navigate away from the field (autosave first).
+	// All other keys feed into the text buffer — EXCEPT j/k/s which would be
+	// eaten when typing URLs/tokens; those are intercepted here only when
+	// the user means "move", i.e. when the key is the named arrow key, not a
+	// bare character. The named-arrow keys ("up", "down") are safe to intercept
+	// since they never appear in credential strings.
 	if m.fieldCursor == alertFieldPrimary || m.fieldCursor == alertFieldSecondary {
 		switch km.String() {
-		case "enter":
-			// Enter advances to the next field. Auto-save on the way out.
+		case "enter", "down":
+			// Advance to the next field. Auto-save on the way out.
 			m.autosaveCredentials()
 			next := m.fieldCursor + 1
 			if next == alertFieldSecondary && !m.hasSecondaryField() {
@@ -375,6 +379,15 @@ func (m AlertModel) updateForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if next <= m.maxFieldCursor() {
 				m.fieldCursor = next
+			}
+		case "up":
+			// Move back to the previous field. Auto-save on the way out.
+			m.autosaveCredentials()
+			if m.fieldCursor > 0 {
+				m.fieldCursor--
+				if m.fieldCursor == alertFieldSecondary && !m.hasSecondaryField() {
+					m.fieldCursor--
+				}
 			}
 		default:
 			if m.fieldCursor == alertFieldPrimary {
@@ -419,6 +432,20 @@ func (m AlertModel) updateForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case "s":
 		// 's' fires test-send only when NOT inside a text field (handled above).
 		return m.doTestSend()
+
+	case "d":
+		// Delete the channel currently being edited (only valid when editing
+		// an existing channel, i.e. editingID is non-empty).
+		if m.editingID != "" {
+			cfg, _ := alert.Load(m.dataDir)
+			for i, ch := range cfg.Channels {
+				if ch.ID == m.editingID {
+					m.listCursor = i
+					break
+				}
+			}
+			m.state = alertStateConfirmDelete
+		}
 	}
 
 	return m, nil
@@ -651,7 +678,11 @@ func (m AlertModel) viewForm() string {
 	sb.WriteString("\n")
 
 	content := sb.String()
-	help := HelpTextStyle.Render("tab next field   enter confirm/cycle   s send test   esc back")
+	hintBase := "↑/↓ move   tab next field   s send test   esc back"
+	if m.editingID != "" {
+		hintBase = "↑/↓ move   tab next field   s send test   d delete   esc back"
+	}
+	help := HelpTextStyle.Render(hintBase)
 	boxW := ScreenBoxWidth(m.width, 78)
 	return lipgloss.JoinVertical(lipgloss.Left,
 		renderBoxInner("Alert Settings", content, boxW, ColorBorder),

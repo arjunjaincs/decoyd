@@ -113,7 +113,7 @@ func TestStatusModel_EscEmitsStatusDoneMsg(t *testing.T) {
 // detail screen emits TriggerDetailDoneMsg.
 func TestTriggerDetailModel_EscEmitsDoneMsg(t *testing.T) {
 	ev := triglog.TriggerEvent{ID: "x", TokenID: "y", TriggeredAt: time.Now()}
-	m := NewTriggerDetailModel(testWidth, testHeight, ev)
+	m := NewTriggerDetailModel(testWidth, testHeight, ev, "")
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	if cmd == nil {
 		t.Fatal("esc returned nil cmd; expected TriggerDetailDoneMsg cmd")
@@ -183,8 +183,8 @@ func TestStatusModel_WatcherStateTUIEmbedded(t *testing.T) {
 
 	m := NewStatusModel(testWidth, testHeight, dir, w)
 	view := m.View()
-	if !strings.Contains(view, "running (TUI-embedded)") {
-		t.Errorf("expected 'running (TUI-embedded)' in view; got:\n%s", view)
+	if !strings.Contains(view, "running") || strings.Contains(view, "TUI-embedded") {
+		t.Errorf("expected 'running' (without 'TUI-embedded') in view; got:\n%s", view)
 	}
 }
 

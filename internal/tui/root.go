@@ -284,12 +284,17 @@ func (m RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// ── Show trigger detail ───────────────────────────────────────────────────
 	case ShowTriggerDetailMsg:
-		m.triggerDetail = NewTriggerDetailModel(m.width, m.height, msg.Event)
+		m.triggerDetail = NewTriggerDetailModel(m.width, m.height, msg.Event, m.dataDir)
 		m.current = ScreenTriggerDetail
 		return m, m.triggerDetail.Init()
 
 	// ── Trigger detail done ───────────────────────────────────────────────────
 	case TriggerDetailDoneMsg:
+		m.current = ScreenStatus
+		return m, m.statusScreen.Init()
+
+	// ── Trigger event deleted — return to status and refresh list ─────────────
+	case TriggerDetailDeletedMsg:
 		m.current = ScreenStatus
 		return m, m.statusScreen.Init()
 
