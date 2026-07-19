@@ -1021,9 +1021,9 @@ TIME                     TOKEN               TYPE        EVENT   STATUS
 
 ---
 
-### Phase 4 readiness assessment
+### Phase 4 readiness assessment — FINAL (commit `5abc483`)
 
-**Phase 4 is closed.** Here is the honest state:
+**Phase 4 is closed.** Honest state:
 
 **What is real and tested:**
 - Step 0 (multi-channel config): ✅ CI confirmed ubuntu + windows
@@ -1033,12 +1033,59 @@ TIME                     TOKEN               TYPE        EVENT   STATUS
 - Step 4 (dashboard UI): ✅ Local only (CI pending after push)
 - Step 5 (reconciliation): ✅ Local only (CI pending after push)
 - Panic recovery: ✅ Builds on both platforms, all tests pass
-- End-to-end loop: ✅ Confirmed live × 2, write and rename events, Discord delivery
+- End-to-end loop (headless): ✅ Confirmed live × 2, write and rename events, Discord delivery
+- **TUI-embedded watcher**: ✅ Confirmed — see below
+- **`decoyd install` (Windows)**: ✅ Confirmed — see below
 
 **What is intentionally deferred to Phase 5:**
-- TUI-embedded watcher mode (auto-start wiring)
 - Windows read-only access detection (ETW/minifilter)
 - `decoyd remove --purge` (delete deployed file from disk)
 - Multi-channel assignment UI improvements
 
-**Nothing blocks Phase 5.** The core detection loop is working end-to-end.
+**Nothing blocks Phase 5.**
+
+---
+
+### Post-assessment: TUI-embedded watcher and decoyd install (commit `5abc483`)
+
+#### TUI-embedded watcher auto-start
+
+**Previous state:** `m.watcher` was always nil. Opening the TUI did zero monitoring. This was the spec-approved Q1 answer ("auto-start on launch, always-on monitoring") that was never implemented.
+
+**What was implemented:**
+- `RootModel.Init()` fires `startWatcherCmd()` alongside `reconcileCmd()` on Splash/MainMenu screens
+- `startWatcherCmd()` creates a `watch.Watcher` with `st != nil` (bbolt-backed, not snapshot) and calls `Start()`
+- If `ErrWatcherRunning` is returned (headless `decoyd watch` already holds the lock), degrades gracefully — `watcherStartedMsg{nil}`, dashboard shows headless state, no crash
+- `startWatcherCmd()` is a no-op if `m.watcher != nil` (prevents double-start on return-to-menu)
+- All quit paths (ctrl+c, q, menu option 4) call `m.watcher.Stop()` synchronously before returning `tea.Quit` — PID file cleaned up
+- `main.go` also calls `w.Stop()` after `p.Run()` returns (handles no-TTY exits, SIGTERM)
+- New `RootModel.Watcher()` accessor exposes the embedded watcher to `main.go`
+
+**E2E confirmed:** TUI started (no separate `decoyd watch`), write event fired, `triggers.jsonl` shows `pending→sent`, Discord alert delivered:
+```
+PASS: watcher.pid=16260, process alive (decoyd)
+TRIGGERS (2 lines):
+  token=5c60fa0e04e9a2cf  event=write  status=pending
+  token=5c60fa0e04e9a2cf  event=write  status=sent
+```
+
+**6 new tests** in `root_watcher_test.go` covering: nil-store degrade, double-start no-op, msg storage, lock-contention degrade, quit-stops-watcher.
+
+#### decoyd install (Windows)
+
+**Previous state:** Used `schtasks.exe /SC ONLOGON /DELAY 0:30 /RU ""`. Three bugs: `/SC ONLOGON` requires admin on most Windows configurations; `/RU ""` is invalid syntax (missing value); `/DELAY 0:30` is wrong format.
+
+**Root cause investigation:** `schtasks /SC ONLOGON` — admin required. `Register-ScheduledTask -AtLogOn` — also admin required (confirmed on this machine). PowerShell's COM API (`New-Object -ComObject Schedule.Service`) IS accessible without elevation.
+
+**Fix:** Rewrote to use the raw Task Scheduler COM API (`ITaskService`) via PowerShell: creates `TASK_TRIGGER_LOGON` (type 9) with `TASK_LOGON_INTERACTIVE_TOKEN` (3) for the current user. Works without elevation.
+
+**E2E confirmed:**
+```
+Task Scheduler task registered: DecoydWatch   [exit 0]
+TaskName: \DecoydWatch   Status: Ready
+schtasks /Run → watcher.pid=8996, process alive ✅
+```
+
+**Updated output message** clarifies that the TUI already auto-starts the watcher; `decoyd install` is for post-reboot persistence (running headless without opening the TUI).
+
+**Note on reboot simulation:** A hard reboot-equivalent test (log off + log back on) was not performed — it would require interactive session interruption. The task is registered as `Status: Ready` with `AtLogOn` trigger for the current user and fires correctly via `schtasks /Run`. Logon trigger correctness is a property of Task Scheduler, not decoyd code.
