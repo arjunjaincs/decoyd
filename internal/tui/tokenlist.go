@@ -306,12 +306,12 @@ func (m TokenListModel) viewTable(boxW int) string {
 
 		triggered := "no"
 		if tok.Triggered {
-			triggered = WarningStyle.Render("yes ⚠")
+			triggered = WarningStyle.Render("yes " + G.Warn)
 		}
 
 		marker := "  "
 		if isCursor {
-			marker = "▸ "
+			marker = G.Cursor + " "
 		}
 
 		line := fmt.Sprintf("%s%-*s  %-*s  %-*s  %s",
@@ -337,7 +337,7 @@ func (m TokenListModel) viewTable(boxW int) string {
 	}
 
 	box := renderBoxInner("Deployed Tokens", sb.String(), boxW, ColorBorder)
-	footer := HelpTextStyle.Render("↑/↓ browse   d delete   e edit notes   a assign channel   esc back")
+	footer := HelpTextStyle.Render(G.NavUp + "/" + G.NavDown + " browse   d delete   e edit notes   a assign channel   esc back")
 	return lipgloss.JoinVertical(lipgloss.Left, box, footer)
 }
 
@@ -392,7 +392,12 @@ func truncate(s string, n int) string {
 	if len(runes) <= n {
 		return s
 	}
-	return string(runes[:n-1]) + "…"
+	suffix := G.Ellipsis
+	cutAt := n - len([]rune(suffix))
+	if cutAt < 0 {
+		cutAt = 0
+	}
+	return string(runes[:cutAt]) + suffix
 }
 
 // ----------------------------------------------------------------------------
@@ -411,10 +416,10 @@ func (m TokenListModel) assignOptions() []string {
 		}
 		suffix := ""
 		if ch.ID == m.alertCfg.DefaultID {
-			suffix += " ★"
+			suffix += " " + G.Star
 		}
 		if len(m.all) > 0 && ch.ID == m.all[m.cursor].AlertChannelID {
-			suffix += " ✓"
+			suffix += " " + G.OK
 		}
 		opts = append(opts, label+suffix)
 	}
@@ -488,7 +493,7 @@ func (m TokenListModel) viewAssign(boxW int) string {
 	for i, opt := range opts {
 		marker := "  "
 		if i == m.assignCursor {
-			marker = "▸ "
+			marker = G.Cursor + " "
 		}
 		line := marker + opt
 		if i == m.assignCursor {
@@ -500,7 +505,7 @@ func (m TokenListModel) viewAssign(boxW int) string {
 
 	content := strings.TrimRight(sb.String(), "\n")
 	box := renderBoxInner("Assign Alert Channel", content, boxW, ColorPrimary)
-	footer := HelpTextStyle.Render("↑/↓ choose   enter confirm   esc cancel   ★ = default   ✓ = current")
+	footer := HelpTextStyle.Render(G.NavUp + "/" + G.NavDown + " choose   enter confirm   esc cancel   " + G.Star + " = default   " + G.OK + " = current")
 	return lipgloss.JoinVertical(lipgloss.Left, box, footer)
 }
 

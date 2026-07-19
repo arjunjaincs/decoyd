@@ -100,7 +100,13 @@ type AlertModel struct {
 }
 
 // spinnerFrames is the spinner used while the test send is in flight.
-var spinnerFrames = []string{"⠋", "⠙", "⠸", "⠴", "⠦", "⠇"}
+// Braille frames are used when the terminal supports Unicode; ASCII rotation otherwise.
+var spinnerFrames = func() []string {
+	if HasUnicode {
+		return []string{"\u280b", "\u2819", "\u2838", "\u2826", "\u2807", "\u280b"}
+	}
+	return []string{"-", "\\", "|", "/", "-", "\\"}
+}()
 
 type alertSpinTickMsg struct{}
 
@@ -294,7 +300,7 @@ func (m AlertModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.resultMsg = "Test send failed: " + msg.err.Error()
 			m.resultErr = true
 		} else {
-			m.resultMsg = "✓ Test alert delivered successfully"
+			m.resultMsg = G.OK + " Test alert delivered successfully"
 			m.resultErr = false
 		}
 		return m, nil
@@ -636,7 +642,7 @@ func (m AlertModel) viewForm() string {
 	// ── Send button ───────────────────────────────────────────────────────
 	sendLabel := "[ Send test alert ]"
 	if m.fieldCursor == alertFieldSend {
-		sb.WriteString(SelectedItemStyle().Render("▸ " + sendLabel))
+		sb.WriteString(SelectedItemStyle().Render(G.Cursor+" "+sendLabel))
 	} else {
 		sb.WriteString(NormalItemStyle.Render("  " + sendLabel))
 	}
@@ -655,7 +661,7 @@ func (m AlertModel) renderField(fieldIdx int, label, value string, isSecret, _ b
 	focused := m.fieldCursor == fieldIdx
 	prefix := "  "
 	if focused {
-		prefix = "▸ "
+		prefix = G.Cursor + " "
 	}
 	labelStr := MutedStyle.Render(label+":")
 	var valueStr string
@@ -695,7 +701,7 @@ func (m AlertModel) fieldDisplay(buf []rune, pos int, focused bool, isSecret boo
 
 func (m AlertModel) viewSending() string {
 	frame := spinnerFrames[m.spinFrame%len(spinnerFrames)]
-	content := fmt.Sprintf("%s  Sending test alert…", frame)
+	content := fmt.Sprintf("%s  Sending test alert%s", frame, G.Ellipsis)
 	return RenderBox("Alert Settings", content, m.width)
 }
 
@@ -843,11 +849,11 @@ func (m AlertModel) viewList() string {
 			}
 			suffix := ""
 			if ch.ID == cfg.DefaultID {
-				suffix += " ★"
+				suffix += " " + G.Star
 			}
 			marker := "  "
 			if i == m.listCursor {
-				marker = "▸ "
+				marker = G.Cursor + " "
 			}
 			line := fmt.Sprintf("%s%-20s  %s%s", marker, label, ch.Type, suffix)
 			if i == m.listCursor {
@@ -859,7 +865,7 @@ func (m AlertModel) viewList() string {
 	}
 
 	content := strings.TrimRight(sb.String(), "\n")
-	help := HelpTextStyle.Render("↑/↓ browse   enter edit   a add   d delete   s set default   esc back   ★ = default")
+	help := HelpTextStyle.Render(G.NavUp+"/"+G.NavDown+" browse   enter edit   a add   d delete   s set default   esc back   "+G.Star+" = default")
 	return lipgloss.JoinVertical(lipgloss.Left,
 		RenderBox("Alert Channels", content, m.width),
 		help,

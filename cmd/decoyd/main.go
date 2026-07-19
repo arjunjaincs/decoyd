@@ -71,6 +71,8 @@ func run(args []string) error {
 	}
 
 	// No subcommand → launch TUI.
+	// Splash shows on every launch (not just first run — the typewriter
+	// animation also serves as a natural startup indicator).
 	firstRun, err := config.IsFirstRun(dataDir)
 	if err != nil {
 		return fmt.Errorf("cannot check first-run state: %w", err)
@@ -82,7 +84,8 @@ func run(args []string) error {
 	}
 
 	// Start with zero dimensions; bubbletea will send a WindowSizeMsg immediately.
-	model := tui.NewRootModel(firstRun, 0, 0, st, dataDir)
+	// Always pass isFirstRun=true so the splash screen plays on every launch.
+	model := tui.NewRootModel(true, 0, 0, st, dataDir)
 	p := tea.NewProgram(
 		model,
 		tea.WithAltScreen(),

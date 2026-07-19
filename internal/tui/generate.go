@@ -281,13 +281,13 @@ func (m GenerateModel) viewSelect() string {
 		// Marker: ▸ if cursor, two spaces otherwise.
 		markerStr := "  "
 		if isCursor {
-			markerStr = "▸ "
+			markerStr = G.Cursor + " "
 		}
 
 		// Checkbox.
 		var checkbox string
 		if isSelected {
-			checkbox = lipgloss.NewStyle().Foreground(ColorPrimary).Bold(true).Render("[✓]")
+			checkbox = lipgloss.NewStyle().Foreground(ColorPrimary).Bold(true).Render("["+G.OK+"]")
 		} else {
 			checkbox = MutedStyle.Render("[ ]")
 		}
@@ -313,7 +313,7 @@ func (m GenerateModel) viewSelect() string {
 	// Inline error (if any).
 	if m.inlineErr != "" {
 		sb.WriteString("\n")
-		sb.WriteString(WarningStyle.Render("  ⚠ " + m.inlineErr))
+		sb.WriteString(WarningStyle.Render("  " + G.Warn + " " + m.inlineErr))
 		sb.WriteString("\n")
 	}
 
@@ -327,7 +327,7 @@ func (m GenerateModel) viewSelect() string {
 	}
 	box := renderBoxInner("Generate a Decoy", content, boxWidth, ColorBorder)
 
-	footer := HelpTextStyle.Render("↑/↓ navigate   space toggle   enter generate   esc back   ? help")
+	footer := HelpTextStyle.Render(G.NavUp + "/" + G.NavDown + " navigate   space toggle   enter generate   esc back   ? help")
 	return lipgloss.JoinVertical(lipgloss.Left, box, footer)
 }
 
@@ -337,7 +337,7 @@ func (m GenerateModel) renderNotesField() string {
 
 	prefix := "  Label (optional): "
 	if isFocused {
-		prefix = SelectedItemStyle().Render("▸ Label (optional): ")
+		prefix = SelectedItemStyle().Render(G.Cursor + " Label (optional): ")
 	} else {
 		prefix = MutedStyle.Render(prefix)
 	}
@@ -380,12 +380,12 @@ func (m GenerateModel) viewDone() string {
 	// Result rows.
 	for _, r := range m.results {
 		if r.err != nil {
-			icon := ErrorStyle.Render("✗")
+			icon := ErrorStyle.Render(G.Fail)
 			label := NormalItemStyle.Render("  " + r.typeDef.Label)
 			errTxt := ErrorStyle.Render("  error: " + r.err.Error())
 			sb.WriteString("  " + icon + label + "\n" + errTxt + "\n")
 		} else {
-			icon := lipgloss.NewStyle().Foreground(ColorPrimary).Bold(true).Render("✓")
+			icon := lipgloss.NewStyle().Foreground(ColorPrimary).Bold(true).Render(G.OK)
 			label := NormalItemStyle.Render(r.typeDef.Label)
 			idTxt := MutedStyle.Render(fmt.Sprintf("  id:%s  file:%s", r.tokenID, r.filename))
 			sb.WriteString("  " + icon + " " + label + "\n" + idTxt + "\n\n")
@@ -396,7 +396,7 @@ func (m GenerateModel) viewDone() string {
 		sb.WriteString(WarningStyle.Render(fmt.Sprintf("  %d token(s) failed — check logs.", failed)) + "\n")
 	}
 
-	sb.WriteString("\n" + MutedStyle.Render("  Deploy from the main menu → Deploy existing decoys."))
+	sb.WriteString("\n" + MutedStyle.Render("  Deploy from the main menu " + G.Arrow + " Deploy existing decoys."))
 
 	content := strings.TrimRight(sb.String(), "\n")
 

@@ -19,6 +19,83 @@ import (
 // See https://no-color.org/
 var NoColor = os.Getenv("NO_COLOR") != ""
 
+// HasUnicode is true when the running terminal supports Unicode / VT sequences.
+// On Linux/macOS this is always true. On Windows it is false for plain cmd.exe
+// (which uses CP437 and renders box-drawing chars as '█') and true for Windows
+// Terminal, VSCode, PowerShell 7+, and any terminal with VT processing enabled.
+//
+// Resolved once at startup via hasVTSupport() (platform-specific in
+// unicode_windows.go / unicode_notwindows.go).
+var HasUnicode = hasVTSupport()
+
+// ----------------------------------------------------------------------------
+// Glyphs — terminal-conditional symbol set
+// All rendered glyphs come from here; never use raw Unicode literals elsewhere.
+// ----------------------------------------------------------------------------
+
+// glyphs holds the full set of symbols used across the TUI, chosen at startup
+// based on whether the terminal supports Unicode/VT sequences.
+type glyphs struct {
+	// Navigation
+	NavUp   string // ↑ or ^
+	NavDown string // ↓ or v
+	Arrow   string // → or ->
+
+	// Cursor / selection
+	Cursor  string // ▸ or >
+
+	// Status icons
+	OK      string // ✓ or [ok]
+	Fail    string // ✗ or [x]
+	Warn    string // ⚠ or [!]
+	Bullet  string // ● or *
+	Empty   string // ○ or o
+	Star    string // ★ or *
+
+	// Text
+	Ellipsis string // … or ...
+	Dot      string // · or .
+
+	// Box drawing (used in titledBorder top edge)
+	Horiz string // ─ or -
+}
+
+// G is the global glyph set, resolved once at startup.
+var G = func() glyphs {
+	if HasUnicode {
+		return glyphs{
+			NavUp:   "\u2191", // ↑
+			NavDown: "\u2193", // ↓
+			Arrow:   "\u2192", // →
+			Cursor:  "\u25b8", // ▸
+			OK:      "\u2713", // ✓
+			Fail:    "\u2717", // ✗
+			Warn:    "\u26a0", // ⚠
+			Bullet:  "\u25cf", // ●
+			Empty:   "\u25cb", // ○
+			Star:    "\u2605", // ★
+			Ellipsis: "\u2026", // …
+			Dot:     "\u00b7", // ·
+			Horiz:   "\u2500", // ─
+		}
+	}
+	return glyphs{
+		NavUp:   "^",
+		NavDown: "v",
+		Arrow:   "->",
+		Cursor:  ">",
+		OK:      "[ok]",
+		Fail:    "[x]",
+		Warn:    "[!]",
+		Bullet:  "*",
+		Empty:   "o",
+		Star:    "*",
+		Ellipsis: "...",
+		Dot:     ".",
+		Horiz:   "-",
+	}
+}()
+
 // ----------------------------------------------------------------------------
 // Palette — named color constants
 // All hex values are defined exactly once here. No other file uses raw hex.
@@ -55,10 +132,18 @@ const (
 
 // BoxStyle is the base bordered box style used for every screen.
 // Use RenderBox() rather than applying this directly.
-var BoxStyle = lipgloss.NewStyle().
-	Border(lipgloss.RoundedBorder()).
-	BorderForeground(ColorBorder).
-	Padding(1, 2)
+// On terminals without Unicode/VT support (plain cmd.exe), NormalBorder is
+// used instead of RoundedBorder to avoid CP437 box-drawing garbage.
+var BoxStyle = func() lipgloss.Style {
+	border := lipgloss.RoundedBorder()
+	if !HasUnicode {
+		border = lipgloss.NormalBorder()
+	}
+	return lipgloss.NewStyle().
+		Border(border).
+		BorderForeground(ColorBorder).
+		Padding(1, 2)
+}()
 
 // TitleStyle renders the box title (placed in the top border line).
 var TitleStyle = lipgloss.NewStyle().
@@ -112,7 +197,13 @@ var WordmarkStyle = lipgloss.NewStyle().
 const MinTermWidth = 60
 
 // NarrowTermMsg is shown when the terminal is too narrow to render properly.
-const NarrowTermMsg = "⟵ Please widen your terminal to at least 60 columns ⟶"
+// Unicode arrows are used when the terminal supports them; plain ASCII otherwise.
+var NarrowTermMsg = func() string {
+	if hasVTSupport() {
+		return "\u27f5 Please widen your terminal to at least 60 columns \u27f6"
+	}
+	return "<< Please widen your terminal to at least 60 columns >>"
+}()
 
 // RenderBox wraps content in the standard rounded-border box.
 // title is placed in the top border (empty string = no title).
@@ -148,7 +239,11 @@ func renderBoxInner(title, content string, boxWidth int, borderColor lipgloss.Co
 
 	var border lipgloss.Border
 	if title == "" {
-		border = lipgloss.RoundedBorder()
+		if HasUnicode {
+			border = lipgloss.RoundedBorder()
+		} else {
+			border = lipgloss.NormalBorder()
+		}
 	} else {
 		border = titledBorder(title, contentWidth)
 	}
@@ -186,14 +281,15 @@ func titledBorder(title string, innerWidth int) lipgloss.Border {
 		}
 	}
 
-	// Build the top edge: ╭─ Title ─...─╮  (corners are added by lipgloss)
-	// lipgloss Border.Top is the repeating fill character for the horizontal run
-	// between the two corners. We can't embed arbitrary strings there directly,
-	// so we set the full Top to our hand-crafted string and let lipgloss use it
-	// verbatim — lipgloss uses the Top string as-is when it is longer than 1 char.
-	top := titleLabel + strings.Repeat("─", rightDashes)
+	// Build the top edge using the appropriate horizontal character.
+	top := titleLabel + strings.Repeat(G.Horiz, rightDashes)
 
-	b := lipgloss.RoundedBorder()
+	var b lipgloss.Border
+	if HasUnicode {
+		b = lipgloss.RoundedBorder()
+	} else {
+		b = lipgloss.NormalBorder()
+	}
 	b.Top = top
 	return b
 }
@@ -207,13 +303,18 @@ func titleBorderStr(title string) string {
 // Helper utilities
 // ----------------------------------------------------------------------------
 
-// Truncate clips s to maxLen runes and appends "…" if truncated.
+// Truncate clips s to maxLen runes and appends G.Ellipsis if truncated.
 func Truncate(s string, maxLen int) string {
 	runes := []rune(s)
 	if len(runes) <= maxLen {
 		return s
 	}
-	return string(runes[:maxLen-1]) + "…"
+	suffix := G.Ellipsis
+	cutAt := maxLen - len([]rune(suffix))
+	if cutAt < 0 {
+		cutAt = 0
+	}
+	return string(runes[:cutAt]) + suffix
 }
 
 // PadCenter centers s within a field of width w, padding with spaces.

@@ -119,7 +119,7 @@ func (m SplashModel) View() string {
 	// ── Subtitle — appears only after wordmark is complete ────────────────────
 	var subtitle string
 	if m.ready {
-		subtitle = MutedStyle.Render(fmt.Sprintf("self-hosted deception  ·  v%s", Version))
+		subtitle = MutedStyle.Render(fmt.Sprintf("self-hosted deception  %s  v%s", G.Dot, Version))
 	} else {
 		// Reserve the line so the box height stays constant.
 		subtitle = MutedStyle.Render(strings.Repeat(" ", 36))

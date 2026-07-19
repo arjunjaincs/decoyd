@@ -120,9 +120,9 @@ func (m TriggerDetailModel) View() string {
 func alertStatusLine(ev triglog.TriggerEvent) string {
 	switch ev.Status {
 	case triglog.TriggerSent:
-		return "✓ sent"
+		return G.OK + " sent"
 	case triglog.TriggerFailed:
-		msg := "✗ failed"
+		msg := G.Fail + " failed"
 		if ev.AlertError != "" {
 			msg += ": " + ev.AlertError
 		}
@@ -132,7 +132,7 @@ func alertStatusLine(ev triglog.TriggerEvent) string {
 	case triglog.TriggerQuietHours:
 		return "z suppressed (quiet hours)"
 	case triglog.TriggerPending:
-		return "… pending (watcher may have crashed before completing dispatch)"
+		return G.Ellipsis + " pending (watcher may have crashed before completing dispatch)"
 	default:
 		return ev.Status
 	}

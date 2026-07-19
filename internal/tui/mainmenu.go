@@ -42,7 +42,14 @@ type menuPulseTickMsg struct{}
 const menuPulseInterval = 400 * time.Millisecond
 
 // pulseFrames cycles through arrow variants to create a subtle pulse.
-var pulseFrames = []string{"▸ ", "▹ ", "▷ ", "▹ "}
+// Unicode triangles are used when the terminal supports them (Windows Terminal,
+// Linux, macOS). Plain cmd.exe (no VT) gets ASCII '>' frames instead.
+var pulseFrames = func() []string {
+	if HasUnicode {
+		return []string{"\u25b8 ", "\u25b9 ", "\u25b7 ", "\u25b9 "}
+	}
+	return []string{"> ", "> ", "> ", "> "}
+}()
 
 func tickMenuPulse() tea.Cmd {
 	return tea.Tick(menuPulseInterval, func(time.Time) tea.Msg {
@@ -128,8 +135,12 @@ func (m MainMenuModel) View() string {
 	// Current animated marker for the selected item.
 	marker := pulseFrames[m.pulseFrame]
 	if NoColor {
-		// In NO_COLOR mode, use a static marker so there's no reliance on color.
-		marker = "▸ "
+		// In NO_COLOR mode, use a static ASCII marker so there's no reliance on color.
+		if HasUnicode {
+			marker = "\u25b8 "
+		} else {
+			marker = "> "
+		}
 	}
 
 	var items string
@@ -154,7 +165,13 @@ func (m MainMenuModel) View() string {
 
 	box := renderBoxInner("Decoyd", items, boxWidth, ColorBorder)
 
-	footer := HelpTextStyle.Render("↑/↓ navigate   enter select   ? help   q quit")
+	var navHint string
+	if HasUnicode {
+		navHint = "\u2191/\u2193 navigate   enter select   ? help   q quit"
+	} else {
+		navHint = "^/v navigate   enter select   ? help   q quit"
+	}
+	footer := HelpTextStyle.Render(navHint)
 
 	return lipgloss.JoinVertical(lipgloss.Left, box, footer)
 }

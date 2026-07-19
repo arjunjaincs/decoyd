@@ -308,7 +308,7 @@ func (m DeployModel) doDeploy(dryRun bool) (DeployModel, tea.Cmd) {
 		msg += "\n  Nothing was written."
 		m.result = msg
 	} else {
-		msg := fmt.Sprintf("✓ Deployed!\n  %s (perm %04o)", res.DeployedTo, deploy.PermForType(tok.Type))
+		msg := fmt.Sprintf("%s Deployed!\n  %s (perm %04o)", G.OK, res.DeployedTo, deploy.PermForType(tok.Type))
 		for _, extra := range res.ExtraFiles {
 			msg += fmt.Sprintf("\n  %s (perm 0644)", extra)
 		}
@@ -361,15 +361,15 @@ func (m DeployModel) viewPickToken() string {
 	for i, tok := range m.allTokens {
 		marker := "  "
 		if i == m.tokenCur {
-			marker = "▸ "
+			marker = G.Cursor + " "
 		}
 		deployed := ""
 		if tok.DeployedPath != "" {
-			deployed = MutedStyle.Render("  → " + tok.DeployedPath)
+			deployed = MutedStyle.Render("  " + G.Arrow + " " + tok.DeployedPath)
 		}
 		triggered := ""
 		if tok.Triggered {
-			triggered = WarningStyle.Render(" ⚠ triggered")
+			triggered = WarningStyle.Render(" " + G.Warn + " triggered")
 		}
 		label := fmt.Sprintf("%s  %s%s", tok.Type, tok.Notes, triggered)
 		var row string
@@ -390,7 +390,7 @@ func (m DeployModel) viewPickToken() string {
 	if m.deleteErr != "" {
 		rows = append(rows, ErrorStyle.Render(m.deleteErr))
 	}
-	rows = append(rows, HelpTextStyle.Render("↑/↓ navigate   enter select   d delete   esc back   ? help"))
+	rows = append(rows, HelpTextStyle.Render(G.NavUp+"/"+G.NavDown+" navigate   enter select   d delete   esc back   ? help"))
 	return lipgloss.JoinVertical(lipgloss.Left, rows...)
 }
 
@@ -436,7 +436,7 @@ func (m DeployModel) viewPickPath() string {
 	for i, p := range m.presets {
 		marker := "  "
 		if i == m.pathCur {
-			marker = "▸ "
+			marker = G.Cursor + " "
 		}
 		line := fmt.Sprintf("%s%s", marker, p.Label)
 		sub := MutedStyle.Render("    " + p.Path)
@@ -450,9 +450,9 @@ func (m DeployModel) viewPickPath() string {
 	// Custom path option.
 	customMarker := "  "
 	if m.pathCur == m.customIdx() {
-		customMarker = "▸ "
+		customMarker = G.Cursor + " "
 	}
-	custLine := customMarker + "Custom path…"
+	custLine := customMarker + "Custom path" + G.Ellipsis
 	if m.pathCur == m.customIdx() {
 		sb.WriteString(SelectedItemStyle().Render(custLine) + "\n")
 	} else {
@@ -461,7 +461,7 @@ func (m DeployModel) viewPickPath() string {
 
 	content := strings.TrimRight(sb.String(), "\n")
 	box := renderBoxInner("Deploy — Choose Destination", content, boxW, ColorBorder)
-	footer := HelpTextStyle.Render("↑/↓ navigate   enter select   esc back")
+	footer := HelpTextStyle.Render(G.NavUp + "/" + G.NavDown + " navigate   enter select   esc back")
 	return lipgloss.JoinVertical(lipgloss.Left, box, footer)
 }
 

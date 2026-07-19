@@ -22,8 +22,8 @@ type helpEntry struct {
 // All screens share these bindings; screen-specific bindings are shown in each
 // screen's footer rather than here.
 var globalBindings = []helpEntry{
-	{"↑ / k", "Move selection up"},
-	{"↓ / j", "Move selection down"},
+	{G.NavUp + " / k", "Move selection up"},
+	{G.NavDown + " / j", "Move selection down"},
 	{"Enter", "Confirm / select"},
 	{"Space", "Toggle item (multi-select lists)"},
 	{"Esc", "Back to previous screen"},

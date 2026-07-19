@@ -185,7 +185,7 @@ func (m StatusModel) View() string {
 	}
 
 	b.WriteString("\n")
-	b.WriteString(HelpTextStyle.Render("↑/↓ navigate  enter detail  r refresh  esc back"))
+	b.WriteString(HelpTextStyle.Render(G.NavUp + "/" + G.NavDown + " navigate  enter detail  r refresh  esc back"))
 
 	return RenderBox("Status / Triggers", b.String(), m.width)
 }
@@ -196,23 +196,23 @@ func (m StatusModel) watcherStatusLine() string {
 		// TUI-embedded: query the live watcher directly.
 		st := m.WatcherRef.Status()
 		if st.Running {
-			line := fmt.Sprintf("● running (TUI-embedded) — watching %d file(s)", st.Watching)
+			line := fmt.Sprintf("%s running (TUI-embedded) — watching %d file(s)", G.Bullet, st.Watching)
 			return SelectedItemStyle().Render(line)
 		}
-		return WarningStyle.Render("○ watcher stopped")
+		return WarningStyle.Render(G.Empty + " watcher stopped")
 	}
 
 	// Headless: read watcher.pid.
 	state, pid := watch.HeadlessWatcherState(m.dataDir)
 	switch state {
 	case watch.HeadlessRunning:
-		line := fmt.Sprintf("● running (headless, PID %d)", pid)
+		line := fmt.Sprintf("%s running (headless, PID %d)", G.Bullet, pid)
 		return SelectedItemStyle().Render(line)
 	case watch.HeadlessStale:
-		line := fmt.Sprintf("⚠ stale lock (PID %d dead) — delete watcher.pid to clear", pid)
+		line := fmt.Sprintf("%s stale lock (PID %d dead) — delete watcher.pid to clear", G.Warn, pid)
 		return WarningStyle.Render(line)
 	default: // HeadlessNotRunning
-		return MutedStyle.Render("○ watcher not running — start with: decoyd watch")
+		return MutedStyle.Render(G.Empty + " watcher not running — start with: decoyd watch")
 	}
 }
 
@@ -220,7 +220,7 @@ func (m StatusModel) watcherStatusLine() string {
 func (m StatusModel) renderEventRow(idx int, ev triglog.TriggerEvent) string {
 	cursor := "  "
 	if idx == m.cursor {
-		cursor = "▸ "
+		cursor = G.Cursor + " "
 	}
 
 	timestamp := ev.TriggeredAt.Local().Format("2006-01-02 15:04:05")
@@ -244,15 +244,15 @@ func (m StatusModel) renderEventRow(idx int, ev triglog.TriggerEvent) string {
 func statusMarker(status string) string {
 	switch status {
 	case triglog.TriggerSent:
-		return "✓"
+		return G.OK
 	case triglog.TriggerFailed:
-		return "✗"
+		return G.Fail
 	case triglog.TriggerRateLimited:
 		return "~"
 	case triglog.TriggerQuietHours:
 		return "z"
 	case triglog.TriggerPending:
-		return "…"
+		return G.Ellipsis
 	default:
 		return "?"
 	}
