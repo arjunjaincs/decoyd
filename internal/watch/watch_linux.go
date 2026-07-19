@@ -124,7 +124,7 @@ func (w *linuxWatcher) start() error {
 			// File may not exist yet — skip silently, not fatal.
 			continue
 		}
-		wdMap[int32(wd)] = tok
+		wdMap[int32(wd)] = tok // #nosec G115 -- InotifyAddWatch returns int; Linux WDs are positive and bounded within int32 range
 	}
 
 	w.count = len(wdMap)
@@ -206,8 +206,8 @@ func (w *linuxWatcher) eventLoop(wdMap map[int32]DeployedToken, mask uint32) {
 	var debounceTimer <-chan time.Time
 
 	fds := []unix.PollFd{
-		{Fd: int32(w.inoFD), Events: unix.POLLIN},
-		{Fd: int32(w.stopR), Events: unix.POLLIN},
+		{Fd: int32(w.inoFD), Events: unix.POLLIN}, // #nosec G115 -- fd is non-negative, bounded by RLIMIT_NOFILE (max ~1M), safely fits int32
+		{Fd: int32(w.stopR), Events: unix.POLLIN}, // #nosec G115 -- same: pipe fd is non-negative and fits int32
 	}
 
 	for {
@@ -302,7 +302,7 @@ func (w *linuxWatcher) eventLoop(wdMap map[int32]DeployedToken, mask uint32) {
 
 			// If file was moved/deleted, remove its watch and re-add after a delay.
 			if evMask&(unix.IN_MOVE_SELF|unix.IN_DELETE_SELF) != 0 {
-				_, _ = unix.InotifyRmWatch(w.inoFD, uint32(wd))
+				_, _ = unix.InotifyRmWatch(w.inoFD, uint32(wd)) // #nosec G115 -- wd is int32 from wdMap key; WDs we added are always positive so sign bit is 0
 				delete(wdMap, wd)
 				w.mu.Lock()
 				w.count = len(wdMap)
@@ -313,7 +313,7 @@ func (w *linuxWatcher) eventLoop(wdMap map[int32]DeployedToken, mask uint32) {
 					newWD, err := unix.InotifyAddWatch(w.inoFD, t.DeployedPath, mask)
 					if err == nil {
 						w.mu.Lock()
-						wdMap[int32(newWD)] = t
+						wdMap[int32(newWD)] = t // #nosec G115 -- InotifyAddWatch returns int; Linux WDs are positive and bounded within int32 range
 						w.count = len(wdMap)
 						w.mu.Unlock()
 					}
