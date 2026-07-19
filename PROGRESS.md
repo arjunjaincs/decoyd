@@ -1234,11 +1234,71 @@ Key changes:
 - Items: each row padded to `inner` width via `lipgloss.NewStyle().Width(inner)` so the box never shifts on cursor movement.
 - Footer centered under the box as one `JoinVertical(Center)` unit before `Place`.
 - Border: `RoundedBorder` (VT) / `NormalBorder` (cmd.exe ASCII).
-- Pulse animation (`▸ → ▹ → ▷ → ▹`) unchanged; static `>` in ASCII mode.
+
+---
+
+#### 4. All-screens centering pass
+
+**Commit:** `feat(tui): center all screens + cap box widths`
+
+Added to `theme.go`:
+- `PlaceScreen(w, h, content)` — centers any content in the terminal using `lipgloss.Place`; no-ops if w/h == 0 (before WindowSizeMsg)
+- `ScreenBoxWidth(termW, max)` — returns `termW-4`, capped at `max`, minimum 10
+
+Every screen updated:
+
+| Screen | Max box width | Notes |
+|---|---|---|
+| `generate.go` | 66 | Both `viewList` and `viewDone` wrapped |
+| `deployscreen.go` | 72 | View() collects sub-view then PlaceScreen wraps |
+| `tokenlist.go` | 92 | Table needs more room |
+| `statusscreen.go` | 90 | `RenderBox` → `renderBoxInner + ScreenBoxWidth` |
+| `alertscreen.go` | 78 | All 5 sub-views + View() dispatch refactored |
+| `triggerdetail.go` | 80 | `RenderBox` → capped + PlaceScreen |
+| `help.go` | 70 | Already had width cap; added PlaceScreen centering |
+
+Result: every screen — generate, deploy, token list, status, alert, trigger detail, help overlay — is a focused card floating in the center of the terminal regardless of window size.
+
+---
+
+#### 5. VT/Unicode detection fixes (standalone PowerShell + cmd.exe)
+
+Multiple iterations to correctly detect Unicode support across all Windows hosts:
+
+**Problem 1 — Windows Terminal + cmd.exe subshell:**  
+`GetConsoleMode` checks `ENABLE_VIRTUAL_TERMINAL_PROCESSING` on the child's console handle. Windows Terminal renders VT at the emulator layer regardless of what the child process sets on its handle. So cmd.exe inside Windows Terminal returned `HasUnicode=false` even though the terminal is fully capable.  
+**Fix:** Check `WT_SESSION` / `WT_PROFILE_ID` env vars first — Windows Terminal always injects these into every subprocess.
+
+**Problem 2 — Standalone PowerShell 5.1 (conhost.exe):**  
+`WT_SESSION` is not set. PowerShell 5.1 doesn't pre-enable EVTP on the console handle before spawning child processes. `GetConsoleMode` saw `EVTP=0` → `HasUnicode=false`.  
+**Fix:** Active probe: call `SetConsoleMode(handle, mode|EVTP)`. If it succeeds (Windows 10 v1511+), the OS supports VT. Restore original mode immediately (bubbletea sets it again during `p.Run()`). Return `true`.
+
+Final detection sequence in `unicode_windows.go` (first match wins):
+1. `WT_SESSION` or `WT_PROFILE_ID` set → Windows Terminal → return `true`
+2. `ENABLE_VIRTUAL_TERMINAL_PROCESSING` already set → return `true`
+3. `SetConsoleMode` probe succeeds → Windows 10 v1511+ → return `true`
+4. None of the above → legacy console → return `false` (ASCII fallback)
+
+---
+
+#### 6. Separator double-line fix + cursor glyph research
+
+**Separator double-line:**  
+Root cause: `center()` rendered rows at `Width(inner)` but the box used `Padding(0,3)+Width(inner)`. In lipgloss, `Width(n)` sets content+padding to `n`, so actual content area = `inner - 6`. Rows pre-rendered at `inner` chars wrapped inside the box, splitting the separator: first 40 chars on line 1, remaining 6 chars as a short orphan line.  
+Fix: `Width(inner)` on box → `Width(inner + 6)` so content area = `inner`.
+
+**Separator ASCII mode:**  
+In ASCII mode `G.Horiz = "-"` and `NormalBorder` also uses `-`. Two lines of identical dashes looked like one double-bar.  
+Fix: use `~` for the internal separator in ASCII mode.
+
+**Cursor glyph research:**  
+- `▸`/`▹` (U+25B8/25B9, Geometric Shapes, small) — absent from many Consolas builds → tofu boxes
+- `▶`/`▷` (U+25B6/25B7, Geometric Shapes, large) — still absent from Consolas in many Windows installs → same problem
+- Arrows block (U+2190–21FF): reliable per user confirmation (↑↓ work), but single-line arrows lack visual weight difference for animation
+- **Final fix:** `»` (U+00BB, RIGHT-POINTING DOUBLE ANGLE QUOTATION MARK, Latin-1 Supplement) and `›` (U+203A, SINGLE RIGHT-POINTING ANGLE QUOTATION MARK, General Punctuation). Both are in the Latin-1/General Punctuation range — present in **every** Windows console font including Consolas, Lucida Console, Terminal, and OEM fonts. The `»`↔`›` alternation gives a double-chevron → single-chevron pulse (bolder frame / lighter frame) that is visibly animated in any font.
 
 ---
 
 ### Test status
 
-All 124 tests still pass. No new tests required — the changes are purely rendering (no logic changes to model state machines, navigation, or data flow).
-
+All 124 tests pass. No new tests required — all changes are purely rendering.

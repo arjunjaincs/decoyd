@@ -47,15 +47,24 @@ type menuPulseTickMsg struct{}
 
 const menuPulseInterval = 380 * time.Millisecond
 
-// pulseFrames cycles through arrow variants to create a subtle pulse.
-// Unicode triangles are used when the terminal supports them (Windows Terminal,
-// Linux, macOS). Plain cmd.exe (no VT) gets ASCII '>' frames instead.
-// Note: use ▶ (U+25B6, large filled) and ▷ (U+25B7, large hollow) rather than
-// the smaller ▸/▹ variants — the large forms render clearly in every console
-// font including Consolas and Lucida Console on Windows.
+// pulseFrames cycles through cursor marker variants to create a visible pulse.
+//
+// Character choices — why these specific code points:
+//   Unicode mode: » (U+00BB, RIGHT-POINTING DOUBLE ANGLE QUOTATION MARK) and
+//   › (U+203A, SINGLE RIGHT-POINTING ANGLE QUOTATION MARK).
+//   Both are Latin-1 Supplement / General Punctuation — present in EVERY
+//   Windows console font including Consolas, Lucida Console, Terminal, and all
+//   OEM fonts. The Geometric Shapes block (▶ U+25B6, ▷ U+25B7) is incomplete
+//   in Consolas and absent from many legacy fonts, rendering as tofu boxes.
+//   The Arrows block (↑↓) is reliable but single-line arrows lack the visual
+//   weight difference needed for an obvious animation.
+//   The » ↔ › alternation gives a clear double-chevron → single-chevron pulse:
+//   bolder on even frames, lighter on odd frames — visually unmistakable.
+//
+//   ASCII mode: ">" static (no animation possible without VT).
 var pulseFrames = func() []string {
 	if HasUnicode {
-		return []string{"\u25b6 ", "\u25b7 ", "\u25b6 ", "\u25b7 "}
+		return []string{"\u00bb ", "\u203a ", "\u00bb ", "\u203a "}
 	}
 	return []string{"> ", "> ", "> ", "> "}
 }()

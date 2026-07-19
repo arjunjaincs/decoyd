@@ -42,7 +42,7 @@ go build -o decoyd ./cmd/decoyd
 
 Every launch plays a brief animated splash screen → press any key → centered main menu.
 
-The TUI detects your terminal's Unicode/VT support at startup. Full Unicode and rounded box borders are used when available (Windows Terminal, macOS Terminal, Linux). Plain ASCII fallbacks (`+-|`, `>`, `[ok]`) are used automatically in environments without VT processing (e.g., raw `cmd.exe`).
+The TUI detects your terminal's Unicode/VT support at startup using a three-stage check: Windows Terminal (`WT_SESSION` env var), an existing `ENABLE_VIRTUAL_TERMINAL_PROCESSING` console flag, and finally an active probe (`SetConsoleMode` succeeds on Windows 10 v1511+). Full Unicode glyphs, rounded box borders, and animated `»/›` cursor work in Windows Terminal, standalone PowerShell 5.1+, macOS Terminal, and Linux. Plain ASCII fallbacks (`+-|`, `>`) activate only on genuine legacy consoles. Every screen is centered as a focused card regardless of terminal width.
 
 **Generate a decoy**
 1. Select **1. Generate a decoy** from the main menu
