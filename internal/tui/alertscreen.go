@@ -598,18 +598,20 @@ func handleTextInput(buf []rune, pos int, km tea.KeyMsg) ([]rune, int) {
 // ----------------------------------------------------------------------------
 
 func (m AlertModel) View() string {
+	var content string
 	switch m.state {
 	case alertStateList:
-		return m.viewList()
+		content = m.viewList()
 	case alertStateConfirmDelete:
-		return m.viewConfirmDeleteChannel()
+		content = m.viewConfirmDeleteChannel()
 	case alertStateSending:
-		return m.viewSending()
+		content = m.viewSending()
 	case alertStateDone:
-		return m.viewDone()
+		content = m.viewDone()
 	default:
-		return m.viewForm()
+		content = m.viewForm()
 	}
+	return PlaceScreen(m.width, m.height, content)
 }
 
 func (m AlertModel) viewForm() string {
@@ -650,8 +652,9 @@ func (m AlertModel) viewForm() string {
 
 	content := sb.String()
 	help := HelpTextStyle.Render("tab next field   enter confirm/cycle   s send test   esc back")
+	boxW := ScreenBoxWidth(m.width, 78)
 	return lipgloss.JoinVertical(lipgloss.Left,
-		RenderBox("Alert Settings", content, m.width),
+		renderBoxInner("Alert Settings", content, boxW, ColorBorder),
 		help,
 	)
 }
@@ -702,7 +705,8 @@ func (m AlertModel) fieldDisplay(buf []rune, pos int, focused bool, isSecret boo
 func (m AlertModel) viewSending() string {
 	frame := spinnerFrames[m.spinFrame%len(spinnerFrames)]
 	content := fmt.Sprintf("%s  Sending test alert%s", frame, G.Ellipsis)
-	return RenderBox("Alert Settings", content, m.width)
+	boxW := ScreenBoxWidth(m.width, 78)
+	return renderBoxInner("Alert Settings", content, boxW, ColorBorder)
 }
 
 func (m AlertModel) viewDone() string {
@@ -713,7 +717,8 @@ func (m AlertModel) viewDone() string {
 		content = lipgloss.NewStyle().Foreground(ColorPrimary).Bold(true).Render(m.resultMsg)
 	}
 	content += "\n\n" + MutedStyle.Render("press any key to continue")
-	return RenderBox("Alert Settings", content, m.width)
+	boxW := ScreenBoxWidth(m.width, 78)
+	return renderBoxInner("Alert Settings", content, boxW, ColorBorder)
 }
 
 // ----------------------------------------------------------------------------
@@ -866,8 +871,9 @@ func (m AlertModel) viewList() string {
 
 	content := strings.TrimRight(sb.String(), "\n")
 	help := HelpTextStyle.Render(G.NavUp+"/"+G.NavDown+" browse   enter edit   a add   d delete   s set default   esc back   "+G.Star+" = default")
+	boxW := ScreenBoxWidth(m.width, 78)
 	return lipgloss.JoinVertical(lipgloss.Left,
-		RenderBox("Alert Channels", content, m.width),
+		renderBoxInner("Alert Channels", content, boxW, ColorBorder),
 		help,
 	)
 }
@@ -894,10 +900,7 @@ func (m AlertModel) viewConfirmDeleteChannel() string {
 
 	content := strings.TrimRight(sb.String(), "\n")
 	help := HelpTextStyle.Render("y/enter confirm   n/esc cancel")
-	boxW := m.width - 2
-	if boxW < 10 {
-		boxW = 10
-	}
+	boxW := ScreenBoxWidth(m.width, 78)
 	return lipgloss.JoinVertical(lipgloss.Left,
 		renderBoxInner("Delete Channel", content, boxW, ColorDanger),
 		help,

@@ -327,28 +327,26 @@ func (m DeployModel) View() string {
 	if m.width < MinTermWidth {
 		return NarrowTermMsg
 	}
+	var content string
 	switch m.state {
 	case deployStatePickToken:
-		return m.viewPickToken()
+		content = m.viewPickToken()
 	case deployStatePickPath:
-		return m.viewPickPath()
+		content = m.viewPickPath()
 	case deployStateCustomPath:
-		return m.viewCustomPath()
+		content = m.viewCustomPath()
 	case deployStateConfirm:
-		return m.viewConfirm()
+		content = m.viewConfirm()
 	case deployStateDone:
-		return m.viewDone()
+		content = m.viewDone()
 	case deployStateConfirmDelete:
-		return m.viewConfirmDelete()
+		content = m.viewConfirmDelete()
 	}
-	return ""
+	return PlaceScreen(m.width, m.height, content)
 }
 
 func (m DeployModel) viewPickToken() string {
-	boxW := m.width - 2
-	if boxW < 10 {
-		boxW = 10
-	}
+	boxW := ScreenBoxWidth(m.width, 72)
 
 	if len(m.allTokens) == 0 {
 		content := MutedStyle.Render("  No tokens found. Generate some first (option 1).")
@@ -422,10 +420,7 @@ func (m DeployModel) viewConfirmDelete() string {
 }
 
 func (m DeployModel) viewPickPath() string {
-	boxW := m.width - 2
-	if boxW < 10 {
-		boxW = 10
-	}
+	boxW := ScreenBoxWidth(m.width, 72)
 
 	tok := m.allTokens[m.tokenCur]
 	header := MutedStyle.Render(fmt.Sprintf("  Token: %s   File: %s\n", tok.Type, tok.Filename))
@@ -466,10 +461,7 @@ func (m DeployModel) viewPickPath() string {
 }
 
 func (m DeployModel) viewCustomPath() string {
-	boxW := m.width - 2
-	if boxW < 10 {
-		boxW = 10
-	}
+	boxW := ScreenBoxWidth(m.width, 72)
 
 	tok := m.allTokens[m.tokenCur]
 	header := MutedStyle.Render(fmt.Sprintf("  Token: %s   File: %s\n\n", tok.Type, tok.Filename))
@@ -488,10 +480,7 @@ func (m DeployModel) viewCustomPath() string {
 }
 
 func (m DeployModel) viewConfirm() string {
-	boxW := m.width - 2
-	if boxW < 10 {
-		boxW = 10
-	}
+	boxW := ScreenBoxWidth(m.width, 72)
 
 	tok := m.allTokens[m.tokenCur]
 	dest := m.presets[m.pathCur]
@@ -511,10 +500,7 @@ func (m DeployModel) viewConfirm() string {
 }
 
 func (m DeployModel) viewDone() string {
-	boxW := m.width - 2
-	if boxW < 10 {
-		boxW = 10
-	}
+	boxW := ScreenBoxWidth(m.width, 72)
 
 	borderColor := ColorPrimary
 	if m.resultErr {

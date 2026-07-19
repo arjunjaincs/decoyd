@@ -187,7 +187,9 @@ func (m StatusModel) View() string {
 	b.WriteString("\n")
 	b.WriteString(HelpTextStyle.Render(G.NavUp + "/" + G.NavDown + " navigate  enter detail  r refresh  esc back"))
 
-	return RenderBox("Status / Triggers", b.String(), m.width)
+	boxW := ScreenBoxWidth(m.width, 90)
+	box := renderBoxInner("Status / Triggers", b.String(), boxW, ColorBorder)
+	return PlaceScreen(m.width, m.height, box)
 }
 
 // watcherStatusLine produces the watcher-status summary row with three distinct states.

@@ -113,5 +113,6 @@ func (m HelpModel) View() string {
 
 	box := renderBoxInner("Help", rows, boxWidth, ColorPrimary)
 
-	return lipgloss.JoinVertical(lipgloss.Left, box, footer)
+	combined := lipgloss.JoinVertical(lipgloss.Left, box, footer)
+	return PlaceScreen(m.width, m.height, combined)
 }

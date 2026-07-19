@@ -242,22 +242,19 @@ func (m TokenListModel) View() string {
 		return NarrowTermMsg
 	}
 
-	boxW := m.width - 2
-	if boxW < 10 {
-		boxW = 10
-	}
+	boxW := ScreenBoxWidth(m.width, 92)
 
+	var content string
 	if m.state == tokenListStateConfDel && len(m.all) > 0 {
-		return m.viewConfirmDelete(boxW)
+		content = m.viewConfirmDelete(boxW)
+	} else if m.state == tokenListStateEdit && len(m.all) > 0 {
+		content = m.viewEdit(boxW)
+	} else if m.state == tokenListStateAssign && len(m.all) > 0 {
+		content = m.viewAssign(boxW)
+	} else {
+		content = m.viewTable(boxW)
 	}
-	if m.state == tokenListStateEdit && len(m.all) > 0 {
-		return m.viewEdit(boxW)
-	}
-	if m.state == tokenListStateAssign && len(m.all) > 0 {
-		return m.viewAssign(boxW)
-	}
-
-	return m.viewTable(boxW)
+	return PlaceScreen(m.width, m.height, content)
 }
 
 func (m TokenListModel) viewTable(boxW int) string {

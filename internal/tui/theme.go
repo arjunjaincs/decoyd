@@ -328,3 +328,28 @@ func PadCenter(s string, w int) string {
 	right := total - left
 	return strings.Repeat(" ", left) + s + strings.Repeat(" ", right)
 }
+
+// PlaceScreen centers content within the full terminal dimensions using
+// lipgloss.Place. If width or height is 0 (before WindowSizeMsg fires),
+// returns content as-is so at least something renders. All TUI screen View()
+// functions should call this as their final step.
+func PlaceScreen(width, height int, content string) string {
+	if width > 0 && height > 0 {
+		return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, content)
+	}
+	return content
+}
+
+// ScreenBoxWidth returns the appropriate box outer width for a screen, given
+// the terminal width and an optional maximum. Uses termWidth-4 as the base
+// (leaving 2 chars of gutter on each side), capped at max when max > 0.
+func ScreenBoxWidth(termWidth, max int) int {
+	w := termWidth - 4
+	if max > 0 && w > max {
+		w = max
+	}
+	if w < 10 {
+		w = 10
+	}
+	return w
+}

@@ -321,14 +321,11 @@ func (m GenerateModel) viewSelect() string {
 	// Trim the trailing newline so the box padding looks even.
 	content = strings.TrimRight(content, "\n")
 
-	boxWidth := m.width - 2
-	if boxWidth < 10 {
-		boxWidth = 10
-	}
+	boxWidth := ScreenBoxWidth(m.width, 66)
 	box := renderBoxInner("Generate a Decoy", content, boxWidth, ColorBorder)
 
 	footer := HelpTextStyle.Render(G.NavUp + "/" + G.NavDown + " navigate   space toggle   enter generate   esc back   ? help")
-	return lipgloss.JoinVertical(lipgloss.Left, box, footer)
+	return PlaceScreen(m.width, m.height, lipgloss.JoinVertical(lipgloss.Left, box, footer))
 }
 
 // renderNotesField renders the label/notes input row.
@@ -400,12 +397,9 @@ func (m GenerateModel) viewDone() string {
 
 	content := strings.TrimRight(sb.String(), "\n")
 
-	boxWidth := m.width - 2
-	if boxWidth < 10 {
-		boxWidth = 10
-	}
+	boxWidth := ScreenBoxWidth(m.width, 66)
 	box := renderBoxInner("Generated", content, boxWidth, ColorPrimary)
 
 	footer := HelpTextStyle.Render("any key to return to menu")
-	return lipgloss.JoinVertical(lipgloss.Left, box, footer)
+	return PlaceScreen(m.width, m.height, lipgloss.JoinVertical(lipgloss.Left, box, footer))
 }

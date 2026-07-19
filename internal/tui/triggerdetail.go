@@ -113,7 +113,9 @@ func (m TriggerDetailModel) View() string {
 	b.WriteString("\n")
 	b.WriteString(HelpTextStyle.Render("esc / q  back to dashboard"))
 
-	return RenderBox("Trigger Detail", b.String(), m.width)
+	boxW := ScreenBoxWidth(m.width, 80)
+	box := renderBoxInner("Trigger Detail", b.String(), boxW, ColorBorder)
+	return PlaceScreen(m.width, m.height, box)
 }
 
 // alertStatusLine produces the status + error display for the alert outcome.
