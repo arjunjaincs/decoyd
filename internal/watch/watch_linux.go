@@ -188,12 +188,6 @@ func (w *linuxWatcher) status() WatcherStatus {
 // eventLoop
 // ----------------------------------------------------------------------------
 
-// debounceEntry tracks per-path debounce state.
-type debounceEntry struct {
-	token    DeployedToken
-	event    string    // "access", "write", "rename", "delete"
-	expiry   time.Time // fire the alert at or after this time
-}
 
 func (w *linuxWatcher) eventLoop(wdMap map[int32]DeployedToken, mask uint32) {
 	defer close(w.done)

@@ -46,6 +46,15 @@ type rateEntry struct {
 	windowEnd time.Time
 }
 
+// debounceEntry tracks per-path debounce state within a single watcher session.
+// Stored in the event loop's debounce map; not persisted to disk.
+type debounceEntry struct {
+	token  DeployedToken
+	event  string    // "access", "write", "rename", "delete"
+	expiry time.Time // dispatch alert at or after this time
+}
+
+
 
 // inQuietHours reports whether the watcher should suppress alerts at now.
 func (c WatcherConfig) inQuietHours(now time.Time) bool {
