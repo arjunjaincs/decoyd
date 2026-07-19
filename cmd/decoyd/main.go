@@ -88,8 +88,19 @@ func run(args []string) error {
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),
 	)
-	if _, err := p.Run(); err != nil {
-		return fmt.Errorf("TUI error: %w", err)
+	// p.Run returns the final model state. Retrieve any embedded watcher and
+	// stop it cleanly so the PID file is removed regardless of how the TUI
+	// exited (tea.Quit, no-TTY, SIGTERM, etc.).
+	finalModel, runErr := p.Run()
+	if finalModel != nil {
+		if rm, ok := finalModel.(tui.RootModel); ok {
+			if w := rm.Watcher(); w != nil {
+				w.Stop()
+			}
+		}
+	}
+	if runErr != nil {
+		return fmt.Errorf("TUI error: %w", runErr)
 	}
 	return nil
 }

@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"errors"
+
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -100,6 +102,10 @@ func NewRootModel(isFirstRun bool, width, height int, st *store.Store, dataDir s
 // is best-effort and must never block startup or crash the TUI.
 type reconcileDoneMsg struct{ err error }
 
+// watcherStartedMsg carries the result of the background watcher-start attempt.
+// w is nil if the lock was already held by a headless process (graceful degrade).
+type watcherStartedMsg struct{ w *watch.Watcher }
+
 // reconcileCmd returns a Cmd that rebuilds deployed_tokens.json in the background.
 func (m RootModel) reconcileCmd() tea.Cmd {
 	return func() tea.Msg {
@@ -107,15 +113,49 @@ func (m RootModel) reconcileCmd() tea.Cmd {
 	}
 }
 
+// startWatcherCmd attempts to start a TUI-embedded watcher in the background.
+// It uses the bbolt store (st != nil) so token reads go direct to bbolt,
+// not the snapshot file. If another process already holds the watcher lock
+// (ErrWatcherRunning), it degrades gracefully: returns watcherStartedMsg{nil}
+// so the dashboard falls through to the HeadlessWatcherState probe path.
+//
+// No-op if m.watcher is already set (watcher already running for this session).
+func (m RootModel) startWatcherCmd() tea.Cmd {
+	if m.watcher != nil {
+		// Already running from earlier in this session — do not double-start.
+		return nil
+	}
+	if m.st == nil {
+		// Safety: never attempt TUI-embedded mode without a store.
+		return func() tea.Msg { return watcherStartedMsg{nil} }
+	}
+	return func() tea.Msg {
+		w, err := watch.New(m.st, m.dataDir)
+		if err != nil {
+			return watcherStartedMsg{nil}
+		}
+		if startErr := w.Start(); startErr != nil {
+			// If another process holds the lock, degrade gracefully.
+			// Any other error is also treated as degrade (non-fatal for TUI).
+			if errors.Is(startErr, watch.ErrWatcherRunning) {
+				return watcherStartedMsg{nil}
+			}
+			return watcherStartedMsg{nil}
+		}
+		return watcherStartedMsg{w}
+	}
+}
+
 // Init satisfies tea.Model. Delegates to the active sub-model's Init.
 // On first call (Splash or MainMenu) it also fires a background snapshot
-// reconciliation so the headless watcher sees up-to-date token paths.
+// reconciliation AND attempts to start the TUI-embedded watcher.
+// The watcher start is non-blocking and degrades gracefully if the lock is held.
 func (m RootModel) Init() tea.Cmd {
 	switch m.current {
 	case ScreenSplash:
-		return tea.Batch(m.splash.Init(), m.reconcileCmd())
+		return tea.Batch(m.splash.Init(), m.reconcileCmd(), m.startWatcherCmd())
 	case ScreenMainMenu:
-		return tea.Batch(m.mainMenu.Init(), m.reconcileCmd())
+		return tea.Batch(m.mainMenu.Init(), m.reconcileCmd(), m.startWatcherCmd())
 	case ScreenGenerate:
 		return m.generate.Init()
 	case ScreenDeploy:
@@ -154,11 +194,19 @@ func (m RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c":
+			// Stop the embedded watcher synchronously before quitting so the
+			// PID file is cleaned up and the lock is released cleanly.
+			if m.watcher != nil {
+				m.watcher.Stop()
+			}
 			return m, tea.Quit
 		case "q":
 			// Quit from main menu; other screens handle q themselves
 			// (or ignore it) — root intercepts here only on main menu.
 			if m.current == ScreenMainMenu && !m.showHelp {
+				if m.watcher != nil {
+					m.watcher.Stop()
+				}
 				return m, tea.Quit
 			}
 		case "?":
@@ -194,10 +242,17 @@ func (m RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.current = ScreenAlertSettings
 			return m, m.alertScreen.Init()
 		case 3: // Status / dashboard (Phase 4)
+			// Always re-construct with the current watcher reference so the
+			// dashboard reflects TUI-embedded vs headless state correctly.
 			m.statusScreen = NewStatusModel(m.width, m.height, m.dataDir, m.watcher)
 			m.current = ScreenStatus
 			return m, m.statusScreen.Init()
 		case 4: // Quit
+			// Stop the embedded watcher before quitting so the PID file is
+			// cleaned up and the lock released.
+			if m.watcher != nil {
+				m.watcher.Stop()
+			}
 			return m, tea.Quit
 		}
 		return m, nil
@@ -243,10 +298,17 @@ func (m RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.showHelp = false
 		return m, nil
 
+	// ── Watcher started (background, best-effort) ────────────────────────────
+	case watcherStartedMsg:
+		// Store the watcher (nil if lock was already held by headless process).
+		m.watcher = msg.w
+		// Propagate to status screen so it immediately reflects the correct state.
+		m.statusScreen = NewStatusModel(m.width, m.height, m.dataDir, m.watcher)
+		return m, nil
+
 	// ── Snapshot reconciliation (background, best-effort) ──────────────────
 	case reconcileDoneMsg:
 		// Errors are silently dropped — reconciliation is non-fatal.
-		// A future enhancement could surface persistent failures in the status screen.
 		return m, nil
 	}
 
@@ -348,6 +410,13 @@ func (m RootModel) View() string {
 		overlay,
 		lipgloss.WithWhitespaceBackground(ColorBackground),
 	)
+}
+
+// Watcher returns the TUI-embedded watcher, or nil if the TUI does not own one.
+// Used by main.go to stop the watcher after p.Run() returns, ensuring the PID
+// file is cleaned up regardless of how the TUI exited.
+func (m RootModel) Watcher() *watch.Watcher {
+	return m.watcher
 }
 
 // ----------------------------------------------------------------------------
