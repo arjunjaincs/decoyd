@@ -1122,3 +1122,123 @@ The current quit path calls `Stop()` from inside `Update()` (quit-key handlers) 
 - **Phase 6 packaging note:** if decoyd is distributed as a self-contained installer/MSI, test `decoyd install` on a minimal Windows Server Core image where PowerShell is sometimes not installed by default. Consider a fallback to the WMI/COM API called directly if `powershell.exe` is unavailable.
 
 The Linux `decoyd install` path (systemd unit generation) has no equivalent external dependency.
+
+---
+
+## TUI Polish — Unicode / cmd.exe + Splash + Main Menu
+
+### What was done
+
+Three distinct improvements shipped in two commits after Phase 4 closed.
+
+---
+
+#### 1. cmd.exe Unicode rendering fix
+
+**Commits:** `b318638`
+
+**Problem:** Running `decoyd.exe` directly from Windows Command Prompt (`cmd.exe`) rendered every Unicode glyph (`▸`, `↑↓`, `✓✗`, `⚠`, `●○`, `★`, `…`, Braille spinner `⠋⠙⠸`, rounded border corners `╭╯`) as filled boxes (`█`) or garbage bytes. Root cause: cmd.exe uses CP437 codepage by default and does not have `ENABLE_VIRTUAL_TERMINAL_PROCESSING` set.
+
+**Fix — two-file capability detection:**
+
+- `internal/tui/unicode_windows.go` — calls `GetConsoleMode()` on stdout via `golang.org/x/sys/windows`. If `ENABLE_VIRTUAL_TERMINAL_PROCESSING` is not set, sets `HasUnicode = false`.
+- `internal/tui/unicode_notwindows.go` — build-tag stub; always returns `true` on Linux/macOS.
+- `internal/tui/theme.go` — `G` glyph struct with full Unicode set + ASCII fallbacks for every symbol used across the TUI.
+
+**ASCII fallbacks when `!HasUnicode`:**
+
+| Unicode | ASCII |
+|---|---|
+| `▸` cursor | `>` |
+| `↑`/`↓` nav | `^`/`v` |
+| `→` arrow | `->` |
+| `✓` ok | `[ok]` |
+| `✗` fail | `[x]` |
+| `⚠` warn | `[!]` |
+| `●` bullet | `*` |
+| `○` empty | `o` |
+| `★` star | `*` |
+| `…` ellipsis | `...` |
+| `·` dot | `.` |
+| `─` horiz | `-` |
+| Braille spinner | `-\|/` rotation |
+| `RoundedBorder` | `NormalBorder` (`+-\|`) |
+
+All 13 TUI files updated: `mainmenu.go`, `alertscreen.go`, `deployscreen.go`, `generate.go`, `help.go`, `statusscreen.go`, `tokenlist.go`, `triggerdetail.go`, `splash.go`, `theme.go`.
+
+**No behaviour change on Windows Terminal, Linux, or macOS** — those all return `HasUnicode = true`.
+
+**Splash always shown:** `main.go` now always passes `isFirstRun=true` to `NewRootModel`. The `.initialized` sentinel file still tracks true first-run for other purposes; only the splash gate is removed.
+
+---
+
+#### 2. Splash screen redesign
+
+**Commits:** `dafd5b3`
+
+**Problems with original design:**
+1. Off-center: `topPad = (m.height - boxLines)/2` gave wrong result when `m.height == 0` (before `WindowSizeMsg`). Box appeared in the lower half of the screen.
+2. Abrupt reveal: single `ready bool` flag caused subtitle AND prompt to appear simultaneously the instant the last rune was typed. No breathing room.
+3. Visual: narrow box, no separator, one-line animation.
+
+**New design — 4-phase state machine:**
+
+| Phase | What happens | Duration |
+|---|---|---|
+| `splashPhaseWordmark` | `D E C O Y D` types in | 95ms per rune (~1.05s total) |
+| `splashPhasePause` | Wordmark complete, hold — dim separator appears | 500ms |
+| `splashPhaseTagline` | `canary token generator` types in | 26ms per rune (~0.6s) |
+| `splashPhasePrompt` | Version appears; prompt blinks at 560ms interval | Until keypress |
+
+Each phase uses its own tick message type (`splashWordTickMsg`, `splashPauseTickMsg`, `splashTagTickMsg`, `splashBlinkTickMsg`) so phases never cross-fire.
+
+**Centering:** `lipgloss.Place(m.width, m.height, Center, Center, box)` — correct regardless of when `WindowSizeMsg` fires. No manual newline counting.
+
+**Box:** Fixed-max 52-char inner content area (`splashBoxMaxInner`). Responsive up to the cap. Box height is constant across all phases — all content rows are always reserved (blank or spaces); only the rendered text changes. Zero layout jump.
+
+---
+
+#### 3. Main menu redesign
+
+**Commit:** (this session)
+
+**Problems with original design:**
+1. `boxWidth = m.width - 2` — box stretched nearly the full terminal width.
+2. `lipgloss.JoinVertical(Left, box, footer)` — box + footer stacked top-left. No centering.
+3. Box title "Decoyd" in a dashed border. No wordmark, no identity.
+
+**New design:**
+
+```
+╭──────────────────────────────────────────────────╮
+│                                                  │
+│                 D E C O Y D                      │
+│             canary token generator               │
+│                                                  │
+│  ────────────────────────────────────────────    │
+│                                                  │
+│   ▸ 1.  Generate a decoy                         │
+│     2.  Deploy existing decoys                   │
+│     3.  Alert settings                           │
+│     4.  Status                                   │
+│     5.  Quit                                     │
+│                                                  │
+╰──────────────────────────────────────────────────╯
+          ↑/↓ navigate   enter select   ? help   q quit
+```
+
+Key changes:
+- `lipgloss.Place(width, height, Center, Center, combined)` — true centering, no manual padding.
+- `menuBoxMaxInner = 46` — fixed max inner content width. Responsive below cap, never stretches.
+- Header: `WordmarkStyle` "D E C O Y D" + muted "canary token generator" + dim separator.
+- Items: each row padded to `inner` width via `lipgloss.NewStyle().Width(inner)` so the box never shifts on cursor movement.
+- Footer centered under the box as one `JoinVertical(Center)` unit before `Place`.
+- Border: `RoundedBorder` (VT) / `NormalBorder` (cmd.exe ASCII).
+- Pulse animation (`▸ → ▹ → ▷ → ▹`) unchanged; static `>` in ASCII mode.
+
+---
+
+### Test status
+
+All 124 tests still pass. No new tests required — the changes are purely rendering (no logic changes to model state machines, navigation, or data flow).
+

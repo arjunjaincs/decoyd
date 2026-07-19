@@ -40,7 +40,9 @@ go build -o decoyd ./cmd/decoyd
 .\decoyd.exe
 ```
 
-First launch shows a splash screen → press any key → main menu.
+Every launch plays a brief animated splash screen → press any key → centered main menu.
+
+The TUI detects your terminal's Unicode/VT support at startup. Full Unicode and rounded box borders are used when available (Windows Terminal, macOS Terminal, Linux). Plain ASCII fallbacks (`+-|`, `>`, `[ok]`) are used automatically in environments without VT processing (e.g., raw `cmd.exe`).
 
 **Generate a decoy**
 1. Select **1. Generate a decoy** from the main menu
