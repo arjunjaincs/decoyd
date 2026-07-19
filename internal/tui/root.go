@@ -5,6 +5,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/arjunjaincs/decoyd/internal/store"
+	"github.com/arjunjaincs/decoyd/internal/watch"
 )
 
 
@@ -22,7 +23,8 @@ const (
 	ScreenDeploy                      // Phase 2: deploy a token to disk
 	ScreenTokenList                   // Phase 2: list / manage tokens
 	ScreenAlertSettings               // Phase 3: alert channel configuration
-	// Future screens (Phase 4–5) will be added here.
+	ScreenStatus                      // Phase 4: watcher status + trigger dashboard
+	ScreenTriggerDetail               // Phase 4: individual trigger event detail
 )
 
 // ----------------------------------------------------------------------------
@@ -36,13 +38,15 @@ type RootModel struct {
 	current Screen
 
 	// sub-models
-	splash      SplashModel
-	mainMenu    MainMenuModel
-	generate    GenerateModel
-	deploy      DeployModel
-	tokenList   TokenListModel
-	alertScreen AlertModel
-	help        HelpModel
+	splash        SplashModel
+	mainMenu      MainMenuModel
+	generate      GenerateModel
+	deploy        DeployModel
+	tokenList     TokenListModel
+	alertScreen   AlertModel
+	statusScreen  StatusModel
+	triggerDetail TriggerDetailModel
+	help          HelpModel
 
 	// showHelp is true when the help overlay is active.
 	showHelp bool
@@ -54,9 +58,13 @@ type RootModel struct {
 	// st is the open token store, shared with sub-models that need persistence.
 	st *store.Store
 
-	// dataDir is the OS-specific data directory, passed to the alert screen
-	// so it can Load/Save alert_config.json.
+	// dataDir is the OS-specific data directory, passed to sub-models that
+	// need to load/save files (alert config, trigger log, snapshot, lock).
 	dataDir string
+
+	// watcher is the TUI-embedded watcher, set when the TUI owns the watcher.
+	// Nil when headless or when the lock was held by another process.
+	watcher *watch.Watcher
 }
 
 // NewRootModel creates the root model.
@@ -71,34 +79,53 @@ func NewRootModel(isFirstRun bool, width, height int, st *store.Store, dataDir s
 	}
 
 	return RootModel{
-		current:     screen,
-		splash:      NewSplashModel(width, height),
-		mainMenu:    NewMainMenuModel(width, height),
-		generate:    NewGenerateModel(width, height, st),
-		deploy:      NewDeployModel(width, height, st),
-		tokenList:   NewTokenListModel(width, height, st, dataDir),
-		alertScreen: NewAlertModel(width, height, dataDir),
-		help:        NewHelpModel(width, height),
-		width:       width,
-		height:      height,
-		st:          st,
-		dataDir:     dataDir,
+		current:      screen,
+		splash:       NewSplashModel(width, height),
+		mainMenu:     NewMainMenuModel(width, height),
+		generate:     NewGenerateModel(width, height, st),
+		deploy:       NewDeployModel(width, height, st, dataDir),
+		tokenList:    NewTokenListModel(width, height, st, dataDir),
+		alertScreen:  NewAlertModel(width, height, dataDir),
+		statusScreen: NewStatusModel(width, height, dataDir, nil),
+		help:         NewHelpModel(width, height),
+		width:        width,
+		height:       height,
+		st:           st,
+		dataDir:      dataDir,
+	}
+}
+
+// reconcileDoneMsg is the internal result of a background snapshot reconciliation.
+// It carries any error for logging but is otherwise discarded — reconciliation
+// is best-effort and must never block startup or crash the TUI.
+type reconcileDoneMsg struct{ err error }
+
+// reconcileCmd returns a Cmd that rebuilds deployed_tokens.json in the background.
+func (m RootModel) reconcileCmd() tea.Cmd {
+	return func() tea.Msg {
+		return reconcileDoneMsg{err: watch.ReconcileSnapshot(m.st, m.dataDir)}
 	}
 }
 
 // Init satisfies tea.Model. Delegates to the active sub-model's Init.
+// On first call (Splash or MainMenu) it also fires a background snapshot
+// reconciliation so the headless watcher sees up-to-date token paths.
 func (m RootModel) Init() tea.Cmd {
 	switch m.current {
 	case ScreenSplash:
-		return m.splash.Init()
+		return tea.Batch(m.splash.Init(), m.reconcileCmd())
 	case ScreenMainMenu:
-		return m.mainMenu.Init()
+		return tea.Batch(m.mainMenu.Init(), m.reconcileCmd())
 	case ScreenGenerate:
 		return m.generate.Init()
 	case ScreenDeploy:
 		return m.deploy.Init()
 	case ScreenTokenList:
 		return m.tokenList.Init()
+	case ScreenStatus:
+		return m.statusScreen.Init()
+	case ScreenTriggerDetail:
+		return m.triggerDetail.Init()
 	}
 	return nil
 }
@@ -118,6 +145,8 @@ func (m RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.deploy = propagateSize(m.deploy, msg)
 		m.tokenList = propagateSize(m.tokenList, msg)
 		m.alertScreen = propagateSize(m.alertScreen, msg)
+		m.statusScreen = propagateSize(m.statusScreen, msg)
+		m.triggerDetail = propagateSize(m.triggerDetail, msg)
 		m.help = propagateSize(m.help, msg)
 		return m, nil
 
@@ -157,16 +186,19 @@ func (m RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.current = ScreenGenerate
 			return m, m.generate.Init()
 		case 1: // Deploy existing decoys
-			m.deploy = NewDeployModel(m.width, m.height, m.st)
+			m.deploy = NewDeployModel(m.width, m.height, m.st, m.dataDir)
 			m.current = ScreenDeploy
 			return m, m.deploy.Init()
 		case 2: // Alert settings (Phase 3)
 			m.alertScreen = NewAlertModel(m.width, m.height, m.dataDir)
 			m.current = ScreenAlertSettings
 			return m, m.alertScreen.Init()
+		case 3: // Status / dashboard (Phase 4)
+			m.statusScreen = NewStatusModel(m.width, m.height, m.dataDir, m.watcher)
+			m.current = ScreenStatus
+			return m, m.statusScreen.Init()
 		case 4: // Quit
 			return m, tea.Quit
-		// Index 3 (Status) will be routed in Phase 4.
 		}
 		return m, nil
 
@@ -190,9 +222,31 @@ func (m RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.current = ScreenMainMenu
 		return m, m.mainMenu.Init()
 
-	// ── Help hide ────────────────────────────────────────────────────────────
+	// ── Status dashboard done ─────────────────────────────────────────────────
+	case StatusDoneMsg:
+		m.current = ScreenMainMenu
+		return m, m.mainMenu.Init()
+
+	// ── Show trigger detail ───────────────────────────────────────────────────
+	case ShowTriggerDetailMsg:
+		m.triggerDetail = NewTriggerDetailModel(m.width, m.height, msg.Event)
+		m.current = ScreenTriggerDetail
+		return m, m.triggerDetail.Init()
+
+	// ── Trigger detail done ───────────────────────────────────────────────────
+	case TriggerDetailDoneMsg:
+		m.current = ScreenStatus
+		return m, m.statusScreen.Init()
+
+	// ── Help hide ─────────────────────────────────────────────────────────────
 	case HideHelpMsg:
 		m.showHelp = false
+		return m, nil
+
+	// ── Snapshot reconciliation (background, best-effort) ──────────────────
+	case reconcileDoneMsg:
+		// Errors are silently dropped — reconciliation is non-fatal.
+		// A future enhancement could surface persistent failures in the status screen.
 		return m, nil
 	}
 
@@ -234,6 +288,16 @@ func (m RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		newAlert, cmd := m.alertScreen.Update(msg)
 		m.alertScreen = newAlert.(AlertModel)
 		return m, cmd
+
+	case ScreenStatus:
+		newStatus, cmd := m.statusScreen.Update(msg)
+		m.statusScreen = newStatus.(StatusModel)
+		return m, cmd
+
+	case ScreenTriggerDetail:
+		newDetail, cmd := m.triggerDetail.Update(msg)
+		m.triggerDetail = newDetail.(TriggerDetailModel)
+		return m, cmd
 	}
 
 	return m, nil
@@ -261,6 +325,10 @@ func (m RootModel) View() string {
 		base = m.tokenList.View()
 	case ScreenAlertSettings:
 		base = m.alertScreen.View()
+	case ScreenStatus:
+		base = m.statusScreen.View()
+	case ScreenTriggerDetail:
+		base = m.triggerDetail.View()
 	default:
 		base = ""
 	}

@@ -10,6 +10,7 @@ import (
 	"github.com/arjunjaincs/decoyd/internal/alert"
 	"github.com/arjunjaincs/decoyd/internal/store"
 	"github.com/arjunjaincs/decoyd/internal/tokens"
+	"github.com/arjunjaincs/decoyd/internal/watch"
 )
 
 // ----------------------------------------------------------------------------
@@ -155,6 +156,9 @@ func (m TokenListModel) updateConfirmDelete(msg tea.KeyMsg) (TokenListModel, tea
 		} else {
 			m.notice = lipgloss.NewStyle().Foreground(ColorPrimary).Render(
 				fmt.Sprintf("Deleted token %s (%s)", tok.ID, tok.Type))
+			// Update deployed_tokens.json so any running headless watcher
+			// stops watching the deleted token's path immediately.
+			_ = watch.ReconcileSnapshot(m.st, m.dataDir)
 		}
 		m.reload()
 		m.state = tokenListStateBrowse

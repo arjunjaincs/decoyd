@@ -11,6 +11,7 @@ import (
 	"github.com/arjunjaincs/decoyd/internal/deploy"
 	"github.com/arjunjaincs/decoyd/internal/store"
 	"github.com/arjunjaincs/decoyd/internal/tokens"
+	"github.com/arjunjaincs/decoyd/internal/watch"
 )
 
 // ----------------------------------------------------------------------------
@@ -27,11 +28,12 @@ type DeployScreenDoneMsg struct{}
 type deployState int
 
 const (
-	deployStatePickToken  deployState = iota // select which token to deploy
-	deployStatePickPath                      // pick destination (preset or custom)
-	deployStateCustomPath                    // typing a custom path
-	deployStateConfirm                       // confirm before writing
-	deployStateDone                          // result shown
+	deployStatePickToken    deployState = iota // select which token to deploy
+	deployStatePickPath                        // pick destination (preset or custom)
+	deployStateCustomPath                      // typing a custom path
+	deployStateConfirm                         // confirm before writing
+	deployStateDone                            // result shown
+	deployStateConfirmDelete                   // confirming record deletion from picker
 )
 
 // ----------------------------------------------------------------------------
@@ -44,8 +46,9 @@ type DeployModel struct {
 	height  int
 	state   deployState
 	st      *store.Store
+	dataDir string // for writing deployed_tokens.json after deploy/delete
 
-	// Token list (undeployed only — show all for now so user can re-deploy elsewhere)
+	// Token list (show all so user can re-deploy elsewhere)
 	allTokens []tokens.Token
 	tokenCur  int // cursor in allTokens
 
@@ -58,14 +61,18 @@ type DeployModel struct {
 	// Result
 	result    string // success or error description
 	resultErr bool
+
+	// Delete confirm
+	deleteErr string // non-empty if last delete attempt failed
 }
 
 // NewDeployModel creates a fresh DeployModel, loading tokens from the store.
-func NewDeployModel(width, height int, st *store.Store) DeployModel {
+func NewDeployModel(width, height int, st *store.Store, dataDir string) DeployModel {
 	m := DeployModel{
-		width:  width,
-		height: height,
-		st:     st,
+		width:   width,
+		height:  height,
+		st:      st,
+		dataDir: dataDir,
 	}
 	// Load presets (soft failure — show empty list).
 	presets, _ := deploy.PresetDirs()
@@ -104,6 +111,8 @@ func (m DeployModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateCustomPath(msg)
 		case deployStateConfirm:
 			return m.updateConfirm(msg)
+		case deployStateConfirmDelete:
+			return m.updateConfirmDelete(msg)
 		case deployStateDone:
 			return m, func() tea.Msg { return DeployScreenDoneMsg{} }
 		}
@@ -126,8 +135,49 @@ func (m DeployModel) updatePickToken(msg tea.KeyMsg) (DeployModel, tea.Cmd) {
 			return m, nil
 		}
 		m.state = deployStatePickPath
+	case "d":
+		if len(m.allTokens) > 0 {
+			m.deleteErr = ""
+			m.state = deployStateConfirmDelete
+		}
 	case "esc":
 		return m, func() tea.Msg { return DeployScreenDoneMsg{} }
+	}
+	return m, nil
+}
+
+// updateConfirmDelete handles the delete confirmation prompt.
+func (m DeployModel) updateConfirmDelete(msg tea.KeyMsg) (DeployModel, tea.Cmd) {
+	switch msg.String() {
+	case "y", "enter":
+		if len(m.allTokens) == 0 {
+			m.state = deployStatePickToken
+			return m, nil
+		}
+		tok := m.allTokens[m.tokenCur]
+		var err error
+		if m.st != nil {
+			err = m.st.DeleteToken(tok.ID)
+		}
+		if err != nil {
+			m.deleteErr = "Delete failed: " + err.Error()
+		} else {
+			m.deleteErr = ""
+			// Reload token list and clamp cursor.
+			if m.st != nil {
+				ts, _ := m.st.ListTokens()
+				m.allTokens = ts
+			}
+			if m.tokenCur >= len(m.allTokens) && m.tokenCur > 0 {
+				m.tokenCur = len(m.allTokens) - 1
+			}
+			// Update deployed_tokens.json so any running headless watcher
+			// stops watching the deleted token's path immediately.
+			_ = watch.ReconcileSnapshot(m.st, m.dataDir)
+		}
+		m.state = deployStatePickToken
+	case "n", "esc":
+		m.state = deployStatePickToken
 	}
 	return m, nil
 }
@@ -245,6 +295,9 @@ func (m DeployModel) doDeploy(dryRun bool) (DeployModel, tea.Cmd) {
 		if ts, err := m.st.ListTokens(); err == nil {
 			m.allTokens = ts
 		}
+		// Update deployed_tokens.json so any running headless watcher
+		// sees the new path immediately (without requiring a TUI restart).
+		_ = watch.ReconcileSnapshot(m.st, m.dataDir)
 	}
 
 	if dryRun {
@@ -285,6 +338,8 @@ func (m DeployModel) View() string {
 		return m.viewConfirm()
 	case deployStateDone:
 		return m.viewDone()
+	case deployStateConfirmDelete:
+		return m.viewConfirmDelete()
 	}
 	return ""
 }
@@ -328,7 +383,41 @@ func (m DeployModel) viewPickToken() string {
 
 	content := strings.TrimRight(sb.String(), "\n")
 	box := renderBoxInner("Deploy — Select Token", content, boxW, ColorBorder)
-	footer := HelpTextStyle.Render("↑/↓ navigate   enter select   esc back   ? help")
+
+	// Show delete error if the last delete attempt failed.
+	var rows []string
+	rows = append(rows, box)
+	if m.deleteErr != "" {
+		rows = append(rows, ErrorStyle.Render(m.deleteErr))
+	}
+	rows = append(rows, HelpTextStyle.Render("↑/↓ navigate   enter select   d delete   esc back   ? help"))
+	return lipgloss.JoinVertical(lipgloss.Left, rows...)
+}
+
+// viewConfirmDelete renders the delete confirmation prompt.
+func (m DeployModel) viewConfirmDelete() string {
+	boxW := m.width - 2
+	if boxW < 10 {
+		boxW = 10
+	}
+	if len(m.allTokens) == 0 {
+		return ""
+	}
+	tok := m.allTokens[m.tokenCur]
+
+	var sb strings.Builder
+	sb.WriteString(WarningStyle.Render("  Delete this token record?") + "\n\n")
+	sb.WriteString(MutedStyle.Render("  Type:  ") + NormalItemStyle.Render(tok.Type) + "\n")
+	sb.WriteString(MutedStyle.Render("  ID:    ") + NormalItemStyle.Render(tok.ID) + "\n")
+	if tok.DeployedPath != "" {
+		sb.WriteString(MutedStyle.Render("  Path:  ") + NormalItemStyle.Render(tok.DeployedPath) + "\n")
+		sb.WriteString("\n")
+		sb.WriteString(MutedStyle.Render("  Note: the deployed file is NOT removed from disk.") + "\n")
+	}
+
+	content := strings.TrimRight(sb.String(), "\n")
+	box := renderBoxInner("Delete Token", content, boxW, ColorDanger)
+	footer := HelpTextStyle.Render("y/enter confirm   n/esc cancel")
 	return lipgloss.JoinVertical(lipgloss.Left, box, footer)
 }
 

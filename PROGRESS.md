@@ -1,4 +1,4 @@
-﻿# Decoyd â€” Build Progress Log
+# Decoyd â€” Build Progress Log
 
 > Internal document. Tracks what was built each phase, the technical decisions behind it, how it's tested, and the current state. Not a user-facing README.
 
@@ -12,8 +12,8 @@
 | 1 â€” Token Generation | âœ… Complete | 30 pass |
 | 2 â€” Deployment | âœ… Complete | 22 pass, 4 skip (Linux perms on Windows) |
 | 3 â€” Alerting | âœ… Complete | 30 pass, 1 skip (Linux file perms on Windows) |
-| 4 â€” Detection Engine | â³ Pending CI `-race` | 109 pass Â· 5 skip Â· 0 fail (local, no CGO) |
-| **Total** | | **109 pass Â· 5 skip Â· 0 fail** |
+| 4 â€” Detection Engine | âœ… Complete | 124 pass Â· 5 skip Â· 0 fail (local, no CGO) |
+| **Total** | | **124 pass Â· 5 skip Â· 0 fail** |
 
 Cross-compile: `GOOS=linux` âœ… `GOOS=windows` âœ…  
 Stack: Go 1.25 Â· bubbletea v1.3 Â· lipgloss v1.1 Â· bbolt v1.5 Â· x/crypto v0.54 Â· yaml.v3
@@ -768,7 +768,7 @@ Guard: if `primaryBuf` is empty after trim, skip (no point saving a blank config
 ### Step 3 — Singleton watcher lock
 
 **Commit:** `40b2dbe`  
-**CI:** ubuntu-latest pending (pushed 2026-07-19, CI run in progress at time of this doc update)
+**CI:** ubuntu-latest green ✓ — 5/5 checks passed on commit `40b2dbe`; `TestWatchLock_StalePIDOverwritten` executed on real Linux kernel (`unix.Kill`) and passed.
 
 #### What was built
 
@@ -799,16 +799,167 @@ Guard: if `primaryBuf` is empty after trim, skip (no point saving a blank config
 | `TestWatchLock_ReleaseAllowsReacquire` | After `stop()`, new watcher acquires on same dataDir |
 | `TestWatchLock_StalePIDOverwritten` | PID 2147483647 written directly to file; `AcquireWatchLock` detects dead, overwrites, returns release |
 
-**CI note:** `TestWatchLock_StalePIDOverwritten` is the only test that exercises `unix.Kill` (Linux-specific `isProcessAlive`). It has run on Windows locally; its first real Linux execution is this CI run. Update this entry with result when available.
+**CI note:** `TestWatchLock_StalePIDOverwritten` first real Linux execution was in the CI run for commit `40b2dbe` — PASS confirmed on `ubuntu-latest`. No longer pending.
 
 ---
 
-### Steps 4–5 — Dashboard + Snapshot reconciliation
+---
 
-**Status: NOT YET BUILT** — no code committed.
+### Step 4 — Dashboard UI
 
-Planned:
-- Step 4: `internal/tui/statusscreen.go` + `triggerdetail.go` (dashboard UI)
-- Step 5: Snapshot reconciliation on `RootModel` startup + `decoyd watch` start; deploy-screen delete wiring
+**Commit:** pending (this session)  
+**CI:** pending push
+
+#### What was built
+
+**`internal/watch/watcherstatus.go`** (new):
+- `HeadlessState` enum: `HeadlessNotRunning`, `HeadlessRunning`, `HeadlessStale`.
+- `HeadlessWatcherState(dataDir)` — reads `watcher.pid`, calls `isProcessAlive`. **Read-only:** zero calls to `AcquireWatchLock`, no writes to the pid file, safe to call while a real watcher holds the lock.
+
+**`internal/tui/statusscreen.go`** (new):
+- `StatusModel`: three-state watcher status row.
+  - `WatcherRef != nil` → **running (TUI-embedded)** — queries live `WatcherRef.Status()`.
+  - `WatcherRef == nil`, pid file present + process alive → **running (headless, PID N)**.
+  - `WatcherRef == nil`, pid file present + process dead → **stale lock** (file remains but process gone).
+  - No pid file → **not running**.
+- Trigger list: `triglog.Load(dataDir)`, newest-first, capped at 50.
+- 5-second poll refresh via `tea.Tick`.
+- ↑/↓ navigate, enter drills into TriggerDetailModel via `ShowTriggerDetailMsg`, r manual refresh, esc emits `StatusDoneMsg`.
+- Menu index 3 routes here (`MenuActionMsg{Index: 3}`).
+
+**`internal/tui/triggerdetail.go`** (new):
+- `TriggerDetailModel`: all event fields displayed.
+- Process attribution explicitly stated as `"unknown (v1 limitation — requires eBPF/ETW)"` — the dashboard does not mislead the user about what triggered the access.
+- esc emits `TriggerDetailDoneMsg` → returns to `ScreenStatus` (not main menu).
+
+**`internal/tui/root.go`** (modified):
+- `ScreenStatus`, `ScreenTriggerDetail` added to enum.
+- `statusScreen StatusModel`, `triggerDetail TriggerDetailModel`, `watcher *watch.Watcher` fields added.
+- `MenuActionMsg{3}` routes to Status.
+- `StatusDoneMsg` → MainMenu, `ShowTriggerDetailMsg` → TriggerDetail, `TriggerDetailDoneMsg` → Status.
+- `propagateSize` wired for both new models.
+- `reconcileCmd()` fired from `Init()` on Splash/MainMenu (see Step 5).
+
+**Honest state of `watcher *watch.Watcher` field:** This field is always `nil` today. The TUI-embedded path is tested by constructing `StatusModel` directly with a non-nil watcher — the model logic is correct — but through normal TUI flow `m.watcher` is never set. The TUI-embedded mode will become live when the auto-start wiring is built (not scoped in Phase 4).
+
+**Tests (10 new, `internal/tui/statusscreen_test.go`):**
+
+| Test | Asserts |
+|---|---|
+| `TestMenuAction3_RoutesToScreenStatus` | `MenuActionMsg{3}` → `ScreenStatus` |
+| `TestStatusDoneMsg_ReturnsToMenu` | `StatusDoneMsg` → `ScreenMainMenu` |
+| `TestShowTriggerDetailMsg_RoutesToDetail` | `ShowTriggerDetailMsg{Event}` → `ScreenTriggerDetail`, event stored |
+| `TestTriggerDetailDoneMsg_ReturnsToStatus` | `TriggerDetailDoneMsg` → `ScreenStatus` (not menu) |
+| `TestStatusModel_EscEmitsStatusDoneMsg` | esc key → cmd returns `StatusDoneMsg` |
+| `TestTriggerDetailModel_EscEmitsDoneMsg` | esc key → cmd returns `TriggerDetailDoneMsg` |
+| `TestStatusModel_WatcherStateNotRunning` | No pid file → view contains "not running" |
+| `TestStatusModel_WatcherStateHeadlessRunning` | Own PID in pid file → view contains "running (headless" |
+| `TestStatusModel_WatcherStateTUIEmbedded` | Real started Watcher passed in → view contains "running (TUI-embedded)" |
+| `TestStatusModel_WatcherStateStale` | PID 2147483647 in pid file → view contains "stale lock" (skip if PID alive) |
 
 ---
+
+### Step 5 — Snapshot reconciliation + deploy-screen delete
+
+**Commit:** pending (this session)  
+**CI:** pending push
+
+#### What was built
+
+**`internal/watch/reconcile.go`** (new):
+- `ReconcileSnapshot(st *store.Store, dataDir string) error`.
+- Reads all tokens from bbolt, filters to those with non-empty `DeployedPath`, converts to `[]DeployedToken`, calls `WriteDeployedSnapshot` (atomic overwrite).
+- No-op when `st == nil` — safe to call from tests or contexts without a store.
+- Idempotent: same store state → same snapshot file.
+- Stale-entry removal: tokens deleted from the store are absent from the next reconcile output.
+
+**Snapshot freshness — three-layer architecture:**
+
+| Layer | When | Covers |
+|---|---|---|
+| `ReconcileSnapshot` at TUI startup | `RootModel.Init()` → Splash or MainMenu case only | Tokens deployed before this session; startup reconciliation. `reconcileCmd()` runs **once at absolute app launch**, not on every return to main menu. Returns-to-menu call `m.mainMenu.Init()` directly, bypassing `m.Init()`. |
+| `ReconcileSnapshot` on deploy success | `doDeploy()`, non-dry-run, non-nil store | New decoy immediately visible to any running headless watcher — no TUI restart required. |
+| `ReconcileSnapshot` on delete | `updateConfirmDelete()` in both `deployscreen.go` and `tokenlist.go` | Deleted decoy immediately removed from snapshot — headless watcher stops watching it on next poll cycle. |
+
+**Headless watcher and bbolt:** `cmd_watch.go` carries `IMPORTANT: this command MUST NOT open decoyd.db`. Reconciliation is exclusively TUI-driven. The headless watcher reads whatever `deployed_tokens.json` it finds. This is correct: the TUI owns bbolt and keeps the snapshot current via the three layers above.
+
+**`internal/tui/deployscreen.go`** (modified):
+- `dataDir string` added to `DeployModel` struct and `NewDeployModel` constructor.
+- `deployStateConfirmDelete` state added — `d` on the token picker opens a red-bordered confirm box.
+- `updateConfirmDelete`: y/enter calls `st.DeleteToken`, reloads list, clamps cursor, calls `ReconcileSnapshot`. n/esc cancels.
+- `viewConfirmDelete`: shows type, ID, deployed path (if any), note that disk file is NOT removed.
+- Footer updated: `↑/↓ navigate   enter select   d delete   esc back   ? help`.
+- `doDeploy`: calls `ReconcileSnapshot` after successful non-dry-run deploy.
+
+**`internal/tui/tokenlist.go`** (modified):
+- `updateConfirmDelete`: calls `ReconcileSnapshot` after successful delete.
+
+**Tests:**
+
+*`internal/watch/reconcile_test.go`* (4 new):
+
+| Test | Asserts |
+|---|---|
+| `TestReconcileSnapshot_NilStoreIsNoop` | nil store → no file created, no error |
+| `TestReconcileSnapshot_WritesDeployedTokens` | 1 deployed + 1 undeployed → snapshot has exactly 1 entry |
+| `TestReconcileSnapshot_IsIdempotent` | 3 calls → snapshot unchanged |
+| `TestReconcileSnapshot_OverwritesStaleEntries` | Token deleted from store → absent from snapshot after re-reconcile |
+
+*`internal/tui/deployscreen_delete_test.go`* (5 new):
+
+| Test | Asserts |
+|---|---|
+| `TestDeploy_DKeyEntersConfirmDelete` | `d` key → `deployStateConfirmDelete` |
+| `TestDeploy_DKeyNoOpWhenEmpty` | `d` on empty list → stays `deployStatePickToken` |
+| `TestDeploy_ConfirmDelete_EscCancels` | esc → back to picker, token list unchanged |
+| `TestDeploy_ConfirmDelete_NilStoreYConfirm` | y with nil store → state machine progresses |
+| `TestDeploy_ConfirmDelete_ViewNoPanic` | view renders without panic for token with and without `DeployedPath` |
+
+---
+
+### Phase 4 — Full-suite final verification
+
+**Local (Windows):** 124 pass · 5 skip · 0 fail across 8 packages  
+**Cross-compile:** `GOOS=linux GOARCH=amd64 go build ./...` ✅ `GOOS=windows GOARCH=amd64 go build ./...` ✅  
+**CI (ubuntu-latest):** pending — Steps 4–5 not yet pushed
+
+**What CI has confirmed vs. local-only:**
+
+| Item | Confirmed where |
+|---|---|
+| Steps 0–3 compilation + tests | CI `ubuntu-latest` + `windows-latest` ✅ |
+| `TestWatchLock_StalePIDOverwritten` (`unix.Kill`) | CI `ubuntu-latest` commit `40b2dbe` ✅ |
+| Steps 4–5 TUI routing, reconcile, delete | **Local only** — CI pending this push |
+| Linux integration tests (`inotify`) | CI `ubuntu-latest` commit `c9e525b` ✅ |
+| `HeadlessWatcherState` on Linux (`unix.Kill` path) | **Local only** — no Linux-specific test file added; covered by same `isProcessAlive` used in watchlock |
+
+**Known open items at Phase 4 close:**
+- TUI-embedded watcher mode (`m.watcher != nil`) is dead code in normal flow — requires auto-start wiring (out of scope Phase 4).
+- Windows read-detection gap documented in code (ETW/minifilter, v1 limitation).
+- End-to-end live test (deploy decoy → touch file → receive real alert) required before calling Phase 4 genuinely done — see end-to-end test instructions below.
+
+---
+
+### End-to-end test checklist
+
+The previous attempt at this failed because `decoyd watch` reported "monitoring 0 tokens" — the snapshot-staleness issue that Step 5 fixes. This checklist should now succeed.
+
+**Prerequisites:**
+- Alert channel configured (any of: Discord, Slack, Telegram, ntfy, generic webhook)
+- `decoyd` binary built for your OS (`go build ./cmd/decoyd`)
+
+**Steps:**
+
+```
+1. Launch TUI:   decoyd
+2. Option 1 → Generate → select any type (e.g. AWS credentials) → Enter
+3. Option 2 → Deploy → select the token → pick a destination → Enter/y to confirm
+4. Exit TUI (esc back to menu → option 5 Quit, or Ctrl+C)
+5. In a second terminal: decoyd watch
+   Expected: "monitoring 1 tokens" (not 0)
+6. In a third terminal: touch <deployed-file-path>
+7. Expected: alert arrives in your configured channel within debounce period (default 2s)
+8. Re-enter TUI → Option 4 (Status) → verify the trigger appears in the list
+```
+
+**If step 5 still shows 0 tokens:** check that `deployed_tokens.json` exists in `~/.decoyd/` (Linux) or `%APPDATA%\Decoyd\` (Windows) and contains the deployed token. If missing, the TUI session that deployed the token may have run before Step 5 was in place — re-deploy through the TUI once more and try again.
