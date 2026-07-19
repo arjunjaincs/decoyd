@@ -963,3 +963,26 @@ The previous attempt at this failed because `decoyd watch` reported "monitoring 
 ```
 
 **If step 5 still shows 0 tokens:** check that `deployed_tokens.json` exists in `~/.decoyd/` (Linux) or `%APPDATA%\Decoyd\` (Windows) and contains the deployed token. If missing, the TUI session that deployed the token may have run before Step 5 was in place — re-deploy through the TUI once more and try again.
+
+### End-to-end result — CONFIRMED LIVE (2026-07-19)
+
+**Result: PASS.** The complete loop executed successfully on Windows dev machine.
+
+| Step | Result |
+|---|---|
+| `decoyd watch` startup after snapshot bootstrap | `monitoring 1 tokens` ✅ (previously was `0`) |
+| Write event to `C:\Users\MSI\Downloads\.github_token` | Detected within debounce window (2s) |
+| `triggers.jsonl` entry written | `status: pending` → `status: sent` ✅ |
+| Discord webhook call | Delivered — `status: "sent"` confirmed in log ✅ |
+
+**Trigger log entry:**
+```json
+{"id":"2e52a1c26b644050","token_id":"5c60fa0e04e9a2cf","token_type":"github_pat",
+ "path":"C:\\Users\\MSI\\Downloads\\.github_token",
+ "triggered_at":"2026-07-19T09:55:34Z","event_type":"write","status":"sent"}
+```
+
+**Root cause of previous "0 tokens" failure:** `deployed_tokens.json` was missing because the token was deployed before Step 5 existed. The startup `ReconcileSnapshot` in the new TUI (or a one-shot `go run ./cmd/reconcile_once`) creates it. Any token deployed via the updated TUI creates the snapshot automatically at deploy time via the incremental `ReconcileSnapshot` call in `doDeploy()`.
+
+**Phase 4 is genuinely closed.** All five steps implemented, tested, and the end-to-end alert loop confirmed with a real Discord delivery.
+
