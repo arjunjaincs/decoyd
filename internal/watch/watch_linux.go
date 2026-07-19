@@ -24,6 +24,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 	"unsafe"
@@ -210,6 +211,15 @@ func (w *linuxWatcher) status() WatcherStatus {
 func (w *linuxWatcher) eventLoop(wdMap map[int32]DeployedToken, mask uint32) {
 	defer close(w.done)
 
+	// Top-level panic recovery: logs fatal panics to stderr so the crash is
+	// visible even when stderr is redirected to a file. The event loop exits
+	// after logging, which closes w.done and allows stop() to unblock.
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(os.Stderr, "decoyd watch: fatal panic in event loop: %v\n", r)
+		}
+	}()
+
 	// Inotify event buffer: 4096 bytes, each event is ≥ unix.SizeofInotifyEvent bytes.
 	buf := make([]byte, 4096)
 
@@ -228,7 +238,7 @@ func (w *linuxWatcher) eventLoop(wdMap map[int32]DeployedToken, mask uint32) {
 		var earliest time.Time
 		for path, e := range debounce {
 			if now.After(e.expiry) {
-				w.dispatch(rateMap, e.token, e.event, now)
+				w.safeDispatch(rateMap, e.token, e.event, now)
 				delete(debounce, path)
 			} else if earliest.IsZero() || e.expiry.Before(earliest) {
 				earliest = e.expiry
@@ -349,6 +359,20 @@ func inotifyEventType(mask uint32) string {
 	default:
 		return ""
 	}
+}
+
+// safeDispatch wraps dispatch with a per-event panic recovery.
+// A panic inside dispatch (e.g., nil pointer in an alert implementation,
+// unexpected HTTP response structure) is caught and logged to stderr.
+// The event loop continues running — one bad alert delivery does not kill
+// the watcher process.
+func (w *linuxWatcher) safeDispatch(rateMap map[string]*rateEntry, tok DeployedToken, evType string, now time.Time) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(os.Stderr, "decoyd watch: panic dispatching event for token %s: %v\n", tok.ID, r)
+		}
+	}()
+	w.dispatch(rateMap, tok, evType, now)
 }
 
 // ----------------------------------------------------------------------------

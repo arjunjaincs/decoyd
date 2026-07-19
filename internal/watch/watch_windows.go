@@ -31,6 +31,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -176,6 +177,17 @@ func (w *windowsWatcher) status() WatcherStatus {
 func (w *windowsWatcher) eventLoop(fsw *fsnotify.Watcher, pathMap map[string]DeployedToken) {
 	defer close(w.done)
 
+	// Top-level panic recovery: if something unexpected panics outside the
+	// per-dispatch recovery below (e.g., in the select/ticker code), log it to
+	// stderr so the crash is visible even when stderr is redirected to a file.
+	// The event loop exits after logging, which closes w.done and allows
+	// stop() to unblock. The watcher.pid lock is released by stop().
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(os.Stderr, "decoyd watch: fatal panic in event loop: %v\n", r)
+		}
+	}()
+
 	debounce := make(map[string]*debounceEntry)
 	rateMap := make(map[string]*rateEntry)
 
@@ -209,17 +221,21 @@ func (w *windowsWatcher) eventLoop(fsw *fsnotify.Watcher, pathMap map[string]Dep
 				expiry: time.Now().Add(w.cfg.DebounceDuration),
 			}
 
-		case _, ok := <-fsw.Errors:
+		case fsErr, ok := <-fsw.Errors:
 			if !ok {
 				return
 			}
-			// Log errors are ignored — watcher continues.
+			// Log watcher errors to stderr — they were previously swallowed
+			// silently which made debugging impossible. Non-fatal: watcher continues.
+			if fsErr != nil {
+				fmt.Fprintf(os.Stderr, "decoyd watch: fsnotify error: %v\n", fsErr)
+			}
 
 		case now := <-ticker.C:
 			// Fire debounced events that have expired.
 			for path, e := range debounce {
 				if now.After(e.expiry) {
-					w.dispatch(rateMap, e.token, e.event, now)
+					w.safeDispatch(rateMap, e.token, e.event, now)
 					delete(debounce, path)
 				}
 			}
@@ -244,6 +260,20 @@ func fsnotifyEventType(op fsnotify.Op) string {
 	default:
 		return "" // Create, Chmod — not forwarded
 	}
+}
+
+// safeDispatch wraps dispatch with a per-event panic recovery.
+// A panic inside dispatch (e.g., nil pointer in an alert implementation,
+// unexpected HTTP response structure) is caught and logged to stderr.
+// The event loop continues running — one bad alert delivery does not kill
+// the watcher process.
+func (w *windowsWatcher) safeDispatch(rateMap map[string]*rateEntry, tok DeployedToken, evType string, now time.Time) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(os.Stderr, "decoyd watch: panic dispatching event for token %s: %v\n", tok.ID, r)
+		}
+	}()
+	w.dispatch(rateMap, tok, evType, now)
 }
 
 // ----------------------------------------------------------------------------
