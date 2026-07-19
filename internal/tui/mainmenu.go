@@ -176,9 +176,16 @@ func (m MainMenuModel) View() string {
 	if sepLen < 4 {
 		sepLen = 4
 	}
+	// In ASCII mode G.Horiz = "-", which is identical to NormalBorder's top
+	// edge character. Using "~" instead avoids the "double line" visual where
+	// the box border and the internal separator look like one thick bar.
+	sepChar := G.Horiz
+	if !HasUnicode {
+		sepChar = "~"
+	}
 	separatorRow := center(
 		lipgloss.NewStyle().Foreground(ColorBorder).
-			Render(strings.Repeat(G.Horiz, sepLen)),
+			Render(strings.Repeat(sepChar, sepLen)),
 	)
 
 	// ── Cursor marker ─────────────────────────────────────────────────────
