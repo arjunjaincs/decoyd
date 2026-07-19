@@ -430,3 +430,16 @@ func sanitizeErr(err error) error {
 	}
 	return err
 }
+
+// SanitizeErrString returns a sanitized string representation of err suitable
+// for logging and display. Webhook URLs and bot tokens embedded in *url.Error
+// are stripped. Returns "" for nil errors.
+// This exported wrapper is provided for external packages (e.g. watch) that
+// need to log alert errors without exposing secrets.
+func SanitizeErrString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return sanitizeErr(err).Error()
+}
+
