@@ -2,13 +2,15 @@
 
 > Self-hosted canary token generator and monitor with an interactive TUI.
 
-**Stack:** Go · bubbletea + lipgloss (TUI) · bbolt (embedded storage) · single static binary, no runtime dependencies, no cgo.
+**Stack:** Go · bubbletea + lipgloss (TUI) · bbolt (embedded storage) · single static binary. No cgo. No server required. On Windows, `decoyd install` requires `powershell.exe` (present on all stock Windows installations).
 
 ---
 
 ## What it does
 
-Decoyd generates realistic-looking decoy credentials and monitors them for access. Drop a fake AWS key, SSH private key, or `.env` file somewhere an attacker would find it — when they use it, you get an instant alert.
+Decoyd generates realistic-looking decoy credentials and monitors them for access. Drop a fake AWS key, SSH private key, or `.env` file somewhere an attacker would find it — when they touch the file, you get an instant alert.
+
+The TUI starts monitoring automatically when you open it. No separate background service needed — though `decoyd install` registers one for persistent post-reboot monitoring.
 
 **Token types**
 
@@ -71,11 +73,20 @@ If the URL or token is missing or malformed, a clear error is shown before any n
 - The deployed file is NOT removed from disk on delete (by design — the physical canary stays in place)
 - CLI fallback: `decoyd list`
 
+**Watcher / status dashboard**
+1. Select **5. Status** from the main menu to see watcher state and recent trigger events
+2. The watcher starts automatically when you open the TUI — no separate command needed
+3. `↑/↓` to scroll trigger list, `Enter` to drill into an event, `r` to manually refresh, `Esc` to go back
+4. For persistent background monitoring after reboot: `decoyd install` (see CLI section below)
+
 **CLI (for scripting)**
 
 ```sh
 decoyd list             # tab-aligned table of all tokens
 decoyd remove <id>      # delete a token record (file NOT removed from disk)
+decoyd triggers         # recent trigger events (newest-first)
+decoyd watch            # run headless watcher (for servers / no TUI)
+decoyd install          # register OS service: systemd unit (Linux) or Task Scheduler task (Windows)
 decoyd help
 ```
 
@@ -105,6 +116,9 @@ Files written here:
 |---|---|
 | `decoyd.db` | bbolt database — every token you've generated and deployed |
 | `alert_config.json` | Alert channel credentials (webhook URLs, bot tokens) — **0600** |
+| `deployed_tokens.json` | Snapshot of deployed token paths — read by the headless watcher |
+| `triggers.jsonl` | Append-only log of every trigger event and alert status |
+| `watcher.pid` | Lock file holding the watcher's PID — present while watcher is running |
 
 No server, no cloud, no account required.
 
@@ -112,8 +126,9 @@ No server, no cloud, no account required.
 
 ## Requirements
 
-- Go 1.25+
+- Go 1.25+ (to build from source)
 - Windows or Linux (amd64)
+- `powershell.exe` on PATH (Windows only, required for `decoyd install` — present on all stock Windows installations)
 
 ---
 
@@ -125,7 +140,7 @@ No server, no cloud, no account required.
 | 1 — Token generation (8 types, local storage) | ✅ Complete |
 | 2 — Deployment (write to disk, token list, CLI subcommands) | ✅ Complete |
 | 3 — Alerting (Discord, Slack, Telegram, Teams, ntfy, webhook) | ✅ Complete |
-| 4 — Detection engine (file watcher, dashboard) | 🔄 In Progress (Steps 0–3 committed; Steps 4–5 not yet built) |
+| 4 — Detection engine (file watcher, TUI dashboard, `decoyd install`) | ✅ Complete |
 | 5 — Polish (desktop notification, multi-channel UI, onboarding) | 🔜 Planned |
 | 6 — Packaging & distribution (GoReleaser, install scripts) | 🔜 Planned |
 

@@ -1089,3 +1089,36 @@ schtasks /Run → watcher.pid=8996, process alive ✅
 **Updated output message** clarifies that the TUI already auto-starts the watcher; `decoyd install` is for post-reboot persistence (running headless without opening the TUI).
 
 **Note on reboot simulation:** A hard reboot-equivalent test (log off + log back on) was not performed — it would require interactive session interruption. The task is registered as `Status: Ready` with `AtLogOn` trigger for the current user and fires correctly via `schtasks /Run`. Logon trigger correctness is a property of Task Scheduler, not decoyd code.
+
+---
+
+### Phase 4 verification notes (post-push checks)
+
+#### CI — 5/5 confirmed green
+
+All checks passed on push `f58bae2` including `windows-latest / GOOS=windows` (the job that exercises the PowerShell COM install path and the TUI watcher wiring):
+
+| Job | Result |
+|---|---|
+| Build & Test (ubuntu-latest / GOOS=linux) | ✅ 54s |
+| Build & Test (ubuntu-latest / GOOS=windows) | ✅ 15s |
+| Build & Test (windows-latest / GOOS=linux) | ✅ 1m |
+| Build & Test (windows-latest / GOOS=windows) | ✅ 1m |
+| Security Scan (govulncheck + gosec) | ✅ 22s |
+
+#### Stop() double-call safety
+
+`Stop()` is safe to call more than once. Both platform implementations (`watch_windows.go:138`, `watch_linux.go:155`) check `w.running` under a mutex at entry and return immediately (no-op) if already stopped. `w.release` is nil'd after the first call so the PID file cannot be double-removed. FDs on Linux are set to -1 after close so a second `closeFDs()` is also safe.
+
+The current quit path calls `Stop()` from inside `Update()` (quit-key handlers) **and** from `main.go` after `p.Run()` returns. In normal exit (user presses q/ctrl+c), the in-Update call fires first and the post-Run call sees `w.running == false` and returns immediately. In abnormal exit (no-TTY, SIGTERM), only the post-Run call fires. No risk on either path.
+
+#### powershell.exe runtime dependency (Windows install)
+
+`decoyd install` on Windows now shells out to `powershell.exe` to register the Task Scheduler task via the COM API. This is a new **external runtime dependency** that did not exist before this change.
+
+**Assessment:** Safe assumption on any real Windows machine — `powershell.exe` ships with Windows 7+ and is present on every supported version. However:
+- It must be on `PATH` (it always is on stock Windows installations).
+- Corporate environments occasionally restrict PowerShell execution policy or remove it entirely — unlikely but possible.
+- **Phase 6 packaging note:** if decoyd is distributed as a self-contained installer/MSI, test `decoyd install` on a minimal Windows Server Core image where PowerShell is sometimes not installed by default. Consider a fallback to the WMI/COM API called directly if `powershell.exe` is unavailable.
+
+The Linux `decoyd install` path (systemd unit generation) has no equivalent external dependency.
