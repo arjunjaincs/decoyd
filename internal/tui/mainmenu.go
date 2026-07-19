@@ -50,9 +50,12 @@ const menuPulseInterval = 380 * time.Millisecond
 // pulseFrames cycles through arrow variants to create a subtle pulse.
 // Unicode triangles are used when the terminal supports them (Windows Terminal,
 // Linux, macOS). Plain cmd.exe (no VT) gets ASCII '>' frames instead.
+// Note: use ▶ (U+25B6, large filled) and ▷ (U+25B7, large hollow) rather than
+// the smaller ▸/▹ variants — the large forms render clearly in every console
+// font including Consolas and Lucida Console on Windows.
 var pulseFrames = func() []string {
 	if HasUnicode {
-		return []string{"\u25b8 ", "\u25b9 ", "\u25b7 ", "\u25b9 "}
+		return []string{"\u25b6 ", "\u25b7 ", "\u25b6 ", "\u25b7 "}
 	}
 	return []string{"> ", "> ", "> ", "> "}
 }()
@@ -242,7 +245,7 @@ func (m MainMenuModel) View() string {
 		Border(border).
 		BorderForeground(ColorBorder).
 		Padding(0, 3).
-		Width(inner).
+		Width(inner + 6). // +6 = Padding(0,3) × 2 — content area = inner
 		Render(content)
 
 	// ── Footer (hint bar) ────────────────────────────────────────────────
