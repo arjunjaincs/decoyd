@@ -47,6 +47,7 @@ type linuxWatcher struct {
 	mu      sync.Mutex
 	running bool
 	count   int // number of files currently watched
+	release func() // releases the watcher.pid lock; nil when not running
 
 	// inotify and self-pipe fds; both -1 when not running.
 	inoFD  int
@@ -82,9 +83,16 @@ func (w *linuxWatcher) start() error {
 		return fmt.Errorf("watcher already running")
 	}
 
+	// Acquire singleton lock before any inotify initialisation.
+	relFn, lockErr := AcquireWatchLock(w.dataDir)
+	if lockErr != nil {
+		return lockErr
+	}
+
 	// Create inotify instance.
 	inoFD, err := unix.InotifyInit1(unix.IN_CLOEXEC)
 	if err != nil {
+		relFn()
 		return fmt.Errorf("inotify_init1: %w", err)
 	}
 
@@ -92,6 +100,7 @@ func (w *linuxWatcher) start() error {
 	pipefd := [2]int{}
 	if err := unix.Pipe2(pipefd[:], unix.O_CLOEXEC|unix.O_NONBLOCK); err != nil {
 		_ = unix.Close(inoFD)
+		relFn()
 		return fmt.Errorf("pipe2: %w", err)
 	}
 
@@ -100,12 +109,17 @@ func (w *linuxWatcher) start() error {
 	w.stopW = pipefd[1]
 	w.stopCh = make(chan struct{})
 	w.done = make(chan struct{})
+	w.release = relFn
 	w.running = true
 
 	// Load token list.
 	tokens, err := w.loadTokens()
 	if err != nil {
 		w.closeFDs()
+		if w.release != nil {
+			w.release()
+			w.release = nil
+		}
 		w.running = false
 		return fmt.Errorf("load tokens: %w", err)
 	}
@@ -154,6 +168,10 @@ func (w *linuxWatcher) stop() {
 
 	w.mu.Lock()
 	w.closeFDs()
+	if w.release != nil {
+		w.release()
+		w.release = nil
+	}
 	w.running = false
 	w.count = 0
 	w.mu.Unlock()

@@ -54,6 +54,7 @@ type windowsWatcher struct {
 	mu      sync.Mutex
 	running bool
 	count   int
+	release func() // releases the watcher.pid lock; nil when not running
 
 	watcher *fsnotify.Watcher
 	done    chan struct{}
@@ -79,8 +80,15 @@ func (w *windowsWatcher) start() error {
 		return fmt.Errorf("watcher already running")
 	}
 
+	// Acquire singleton lock before any watcher initialisation.
+	relFn, lockErr := AcquireWatchLock(w.dataDir)
+	if lockErr != nil {
+		return lockErr
+	}
+
 	fsw, err := fsnotify.NewWatcher()
 	if err != nil {
+		relFn()
 		return fmt.Errorf("fsnotify.NewWatcher: %w", err)
 	}
 
@@ -115,6 +123,7 @@ func (w *windowsWatcher) start() error {
 	w.watcher = fsw
 	w.done = make(chan struct{})
 	w.count = len(pathMap)
+	w.release = relFn
 	w.running = true
 
 	go w.eventLoop(fsw, pathMap)
@@ -140,6 +149,10 @@ func (w *windowsWatcher) stop() {
 	<-done
 
 	w.mu.Lock()
+	if w.release != nil {
+		w.release()
+		w.release = nil
+	}
 	w.running = false
 	w.count = 0
 	w.watcher = nil
