@@ -125,7 +125,7 @@ No server, no cloud, no account required.
 | 1 — Token generation (8 types, local storage) | ✅ Complete |
 | 2 — Deployment (write to disk, token list, CLI subcommands) | ✅ Complete |
 | 3 — Alerting (Discord, Slack, Telegram, Teams, ntfy, webhook) | ✅ Complete |
-| 4 — Detection engine (file watcher, dashboard) | 🔜 Planned |
+| 4 — Detection engine (file watcher, dashboard) | 🔄 In Progress (Steps 0–3 committed; Steps 4–5 not yet built) |
 | 5 — Polish (desktop notification, multi-channel UI, onboarding) | 🔜 Planned |
 | 6 — Packaging & distribution (GoReleaser, install scripts) | 🔜 Planned |
 
