@@ -237,6 +237,11 @@ func (m DeployModel) updateCustomPath(msg tea.KeyMsg) (DeployModel, tea.Cmd) {
 		if m.customPos < len(m.customBuf) {
 			m.customPos++
 		}
+	case "ctrl+k":
+		m.customBuf = m.customBuf[:m.customPos]
+	case "ctrl+u":
+		m.customBuf = m.customBuf[m.customPos:]
+		m.customPos = 0
 	case "ctrl+v":
 		m.customBuf, m.customPos = pasteIntoBuffer(m.customBuf, m.customPos, readClipboard())
 	default:

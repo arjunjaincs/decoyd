@@ -219,6 +219,11 @@ func (m TokenListModel) updateEdit(msg tea.KeyMsg) (TokenListModel, tea.Cmd) {
 		m.editPos = 0
 	case "ctrl+e", "end":
 		m.editPos = len(m.editBuf)
+	case "ctrl+k":
+		m.editBuf = m.editBuf[:m.editPos]
+	case "ctrl+u":
+		m.editBuf = m.editBuf[m.editPos:]
+		m.editPos = 0
 	case "ctrl+v":
 		m.editBuf, m.editPos = pasteIntoBuffer(m.editBuf, m.editPos, readClipboard())
 	default:

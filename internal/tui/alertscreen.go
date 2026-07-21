@@ -606,6 +606,16 @@ func handleTextInput(buf []rune, pos int, km tea.KeyMsg) ([]rune, int) {
 		pos = 0
 	case "end", "ctrl+e":
 		pos = len(buf)
+	case "ctrl+k":
+		// Kill to end: delete everything from cursor to end of buffer.
+		buf = buf[:pos]
+	case "ctrl+u":
+		// Kill to start: delete everything from start of buffer to cursor.
+		// Since the cursor starts at the end when entering a field, this
+		// effectively clears the whole field — the standard way to wipe
+		// existing content before pasting a new value (ctrl+u then ctrl+v).
+		buf = buf[pos:]
+		pos = 0
 	case "ctrl+v":
 		// Legacy conhost (PowerShell 5.1, cmd.exe) sends ctrl+v instead of
 		// translating it to bracketed-paste sequences. Read from the Windows
@@ -701,9 +711,15 @@ func (m AlertModel) viewForm() string {
 	sb.WriteString("\n")
 
 	content := sb.String()
-	hintBase := "↑/↓ move   tab next field   s send test   esc back"
-	if m.editingID != "" {
-		hintBase = "↑/↓ move   tab next field   s send test   d delete   esc back"
+	var hintBase string
+	if m.fieldCursor == alertFieldPrimary || m.fieldCursor == alertFieldSecondary {
+		// Show editing shortcuts when a text field is focused.
+		hintBase = "ctrl+u clear field   ctrl+v paste   ↑/↓ move field   esc back"
+	} else {
+		hintBase = "↑/↓ move   tab next field   s send test   esc back"
+		if m.editingID != "" {
+			hintBase = "↑/↓ move   tab next field   s send test   d delete   esc back"
+		}
 	}
 	help := HelpTextStyle.Render(hintBase)
 	boxW := ScreenBoxWidth(m.width, 78)

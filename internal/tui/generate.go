@@ -186,6 +186,11 @@ func (m GenerateModel) updateNotesInput(msg tea.KeyMsg) (GenerateModel, tea.Cmd)
 		m.noteCursor = 0
 	case "ctrl+e", "end":
 		m.noteCursor = len(m.notes)
+	case "ctrl+k":
+		m.notes = m.notes[:m.noteCursor]
+	case "ctrl+u":
+		m.notes = m.notes[m.noteCursor:]
+		m.noteCursor = 0
 	case "ctrl+v":
 		m.notes, m.noteCursor = pasteIntoBuffer(m.notes, m.noteCursor, readClipboard())
 	default:
