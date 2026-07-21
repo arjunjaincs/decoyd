@@ -237,6 +237,8 @@ func (m DeployModel) updateCustomPath(msg tea.KeyMsg) (DeployModel, tea.Cmd) {
 		if m.customPos < len(m.customBuf) {
 			m.customPos++
 		}
+	case "ctrl+v":
+		m.customBuf, m.customPos = pasteIntoBuffer(m.customBuf, m.customPos, readClipboard())
 	default:
 		if len(msg.Runes) > 0 {
 			r := msg.Runes
@@ -249,6 +251,15 @@ func (m DeployModel) updateCustomPath(msg tea.KeyMsg) (DeployModel, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+// activeTextFieldContent returns the custom-path buffer content when the user
+// is in the custom-path entry state. Used by root.go for ctrl+c copy.
+func (m DeployModel) activeTextFieldContent() string {
+	if m.state == deployStateCustomPath {
+		return string(m.customBuf)
+	}
+	return ""
 }
 
 func (m DeployModel) updateConfirm(msg tea.KeyMsg) (DeployModel, tea.Cmd) {

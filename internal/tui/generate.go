@@ -186,6 +186,8 @@ func (m GenerateModel) updateNotesInput(msg tea.KeyMsg) (GenerateModel, tea.Cmd)
 		m.noteCursor = 0
 	case "ctrl+e", "end":
 		m.noteCursor = len(m.notes)
+	case "ctrl+v":
+		m.notes, m.noteCursor = pasteIntoBuffer(m.notes, m.noteCursor, readClipboard())
 	default:
 		if len(msg.Runes) > 0 {
 			ins := msg.Runes
@@ -198,6 +200,15 @@ func (m GenerateModel) updateNotesInput(msg tea.KeyMsg) (GenerateModel, tea.Cmd)
 		}
 	}
 	return m, nil
+}
+
+// activeTextFieldContent returns the notes buffer content when the notes field
+// is focused. Used by root.go to implement ctrl+c copy-to-clipboard.
+func (m GenerateModel) activeTextFieldContent() string {
+	if m.cursor == notesIdx {
+		return string(m.notes)
+	}
+	return ""
 }
 
 // doGenerate validates selection, calls generators, persists, shows results.

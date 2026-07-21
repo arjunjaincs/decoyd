@@ -606,6 +606,12 @@ func handleTextInput(buf []rune, pos int, km tea.KeyMsg) ([]rune, int) {
 		pos = 0
 	case "end", "ctrl+e":
 		pos = len(buf)
+	case "ctrl+v":
+		// Legacy conhost (PowerShell 5.1, cmd.exe) sends ctrl+v instead of
+		// translating it to bracketed-paste sequences. Read from the Windows
+		// clipboard directly. On non-Windows or modern terminals this is a
+		// no-op because paste already arrived through the rune path.
+		buf, pos = pasteIntoBuffer(buf, pos, readClipboard())
 	default:
 		if len(km.Runes) > 0 {
 			r := km.Runes
@@ -618,6 +624,23 @@ func handleTextInput(buf []rune, pos int, km tea.KeyMsg) ([]rune, int) {
 		}
 	}
 	return buf, pos
+}
+
+// activeTextFieldContent returns the content of the currently focused text
+// field if the alert screen is in form mode with a text field active.
+// Returns "" in all other states (list, confirm-delete, sending, done).
+// Used by root.go to implement ctrl+c copy-to-clipboard.
+func (m AlertModel) activeTextFieldContent() string {
+	if m.state != alertStateForm {
+		return ""
+	}
+	switch m.fieldCursor {
+	case alertFieldPrimary:
+		return string(m.primaryBuf)
+	case alertFieldSecondary:
+		return string(m.secondaryBuf)
+	}
+	return ""
 }
 
 // ----------------------------------------------------------------------------

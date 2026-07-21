@@ -219,6 +219,8 @@ func (m TokenListModel) updateEdit(msg tea.KeyMsg) (TokenListModel, tea.Cmd) {
 		m.editPos = 0
 	case "ctrl+e", "end":
 		m.editPos = len(m.editBuf)
+	case "ctrl+v":
+		m.editBuf, m.editPos = pasteIntoBuffer(m.editBuf, m.editPos, readClipboard())
 	default:
 		if len(msg.Runes) > 0 {
 			r := msg.Runes
@@ -231,6 +233,15 @@ func (m TokenListModel) updateEdit(msg tea.KeyMsg) (TokenListModel, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+// activeTextFieldContent returns the edit buffer content when the token-list is
+// in note-edit mode. Used by root.go to implement ctrl+c copy-to-clipboard.
+func (m TokenListModel) activeTextFieldContent() string {
+	if m.state == tokenListStateEdit {
+		return string(m.editBuf)
+	}
+	return ""
 }
 
 // ----------------------------------------------------------------------------

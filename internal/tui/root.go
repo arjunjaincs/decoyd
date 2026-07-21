@@ -194,8 +194,14 @@ func (m RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c":
-			// Stop the embedded watcher synchronously before quitting so the
-			// PID file is cleaned up and the lock is released cleanly.
+			// When a text field is active: copy its content to the clipboard
+			// instead of quitting. This lets the user Ctrl+C out a webhook URL,
+			// bot token, or file path without losing their whole session.
+			if text := m.activeTextFieldContent(); text != "" {
+				writeClipboard(text)
+				return m, nil
+			}
+			// No text field active — quit cleanly, stopping the watcher first.
 			if m.watcher != nil {
 				m.watcher.Stop()
 			}
@@ -422,6 +428,23 @@ func (m RootModel) View() string {
 // file is cleaned up regardless of how the TUI exited.
 func (m RootModel) Watcher() *watch.Watcher {
 	return m.watcher
+}
+
+// activeTextFieldContent returns the text currently in the focused text field,
+// or "" if no text field is active. Used by the ctrl+c handler to copy the
+// field content to the clipboard instead of quitting the program.
+func (m RootModel) activeTextFieldContent() string {
+	switch m.current {
+	case ScreenAlertSettings:
+		return m.alertScreen.activeTextFieldContent()
+	case ScreenDeploy:
+		return m.deploy.activeTextFieldContent()
+	case ScreenGenerate:
+		return m.generate.activeTextFieldContent()
+	case ScreenTokenList:
+		return m.tokenList.activeTextFieldContent()
+	}
+	return ""
 }
 
 // ----------------------------------------------------------------------------

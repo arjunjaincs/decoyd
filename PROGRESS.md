@@ -1367,3 +1367,42 @@ The internal implementation detail is irrelevant to the user. Test updated accor
 ### Test status
 
 All tests pass (triglog package now includes ClearAll/DeleteOne exercised by existing integration paths; no additional test files needed for pure rendering changes).
+
+---
+
+## Clipboard: Ctrl+V paste + Ctrl+C copy in all text fields
+
+### Root cause
+In legacy conhost (standalone PowerShell 5.1 / cmd.exe) Ctrl+V sends a raw
+ctrl+v (0x16) byte to the app — the terminal does NOT translate it to paste.
+Modern terminals (Windows Terminal, VSCode) already use bracketed-paste
+sequences that bubbletea v1.3.4 enables by default, so paste already worked
+there (individual pasted chars arrive as a single KeyMsg with Paste=true and
+all runes in km.Runes, which the existing default: branch handles).
+
+### Fix
+
+**New files:**
+- internal/tui/clipboard_windows.go — readClipboard()/writeClipboard() via
+  WinAPI (CF_UNICODETEXT). Uses golang.org/x/sys/windows which is already an
+  indirect dependency. Zero new imports in go.mod.
+- internal/tui/clipboard_notwindows.go — no-op stubs for Linux/macOS.
+- internal/tui/paste.go — shared pasteIntoBuffer(buf, pos, text) helper that
+  strips CR/LF/tab so pasting multi-line content doesn't corrupt single-line fields.
+
+**Ctrl+V paste** added to every text-input handler:
+- alertscreen.go handleTextInput(): case "ctrl+v"
+- deployscreen.go updateCustomPath(): case "ctrl+v"
+- generate.go updateNotesInput(): case "ctrl+v"
+- tokenlist.go updateEdit(): case "ctrl+v"
+
+**Ctrl+C copy-instead-of-quit** (root.go):
+- ctrl+c now calls activeTextFieldContent() on RootModel first.
+- If a text field is active (returns non-empty), calls writeClipboard() and
+  stays in the app — no quit.
+- If not in a text field (returns ""), quits normally (existing behavior).
+- activeTextFieldContent() delegates to each sub-model's matching method.
+- Each model (AlertModel, DeployModel, GenerateModel, TokenListModel) exposes
+  activeTextFieldContent() that returns the focused buffer or "".
+
+All tests pass.
