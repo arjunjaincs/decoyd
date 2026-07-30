@@ -35,7 +35,13 @@ type Store struct {
 func Open(dbPath string) (*Store, error) {
 	db, err := bolt.Open(dbPath, 0o600, &bolt.Options{Timeout: 2 * time.Second})
 	if err != nil {
-		return nil, fmt.Errorf("open store %q: %w", dbPath, err)
+		// bolt.ErrTimeout means another process already holds the exclusive
+		// lock on decoyd.db. Translate to a clear, actionable message.
+		if errors.Is(err, bolt.ErrTimeout) {
+			return nil, errors.New(
+				"another instance of decoyd is already open — close it and try again")
+		}
+		return nil, fmt.Errorf("open database: %w", err)
 	}
 
 	// Ensure the bucket exists.

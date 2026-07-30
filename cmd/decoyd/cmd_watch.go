@@ -21,10 +21,10 @@ import (
 func cmdWatch(dataDir string) error {
 	w, err := watch.New(nil, dataDir) // nil = headless, no bbolt
 	if err != nil {
-		return fmt.Errorf("watch init: %w", err)
+		return err // watch.New errors are already user-facing
 	}
 	if err := w.Start(); err != nil {
-		return fmt.Errorf("watch start: %w", err)
+		return err // ErrWatcherRunning etc. are already user-facing
 	}
 
 	status := w.Status()

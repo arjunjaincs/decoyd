@@ -260,3 +260,58 @@ func TestStore_Notes_RoundTrip(t *testing.T) {
 		t.Errorf("Notes = %q; want %q", got.Notes, tok.Notes)
 	}
 }
+
+// TestOpen_LockConflict verifies that attempting to open a store while it is
+// already held by another opener returns the friendly "already open" message.
+// This is the most important user-facing error in the CLI because it happens
+// whenever the TUI is running and the user also runs 'decoyd list' etc.
+func TestOpen_LockConflict(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	// Open once, hold the lock.
+	first, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("first Open() error: %v", err)
+	}
+	defer first.Close()
+
+	// Second open must time-out and return the friendly message.
+	_, err = store.Open(dbPath)
+	if err == nil {
+		t.Fatal("second Open() succeeded; want lock-contention error")
+	}
+	const want = "another instance of decoyd is already open"
+	if !errors.As(err, new(interface{ Error() string })) {
+		t.Fatalf("second Open() returned non-error: %T", err)
+	}
+	got := err.Error()
+	if got != want+" — close it and try again" {
+		t.Errorf("got error %q\nwant %q", got, want+" — close it and try again")
+	}
+}
+
+// TestOpen_Timeout verifies that the second Open returns in a bounded time
+// (the 2-second timeout) rather than blocking forever.
+func TestOpen_Timeout(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	first, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("first Open() error: %v", err)
+	}
+	defer first.Close()
+
+	start := time.Now()
+	_, err = store.Open(dbPath)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected lock-contention error, got nil")
+	}
+	const maxWait = 5 * time.Second
+	if elapsed > maxWait {
+		t.Errorf("Open() took %v; want ≤ %v (timeout should be ~2s)", elapsed, maxWait)
+	}
+}

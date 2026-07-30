@@ -2,6 +2,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"github.com/arjunjaincs/decoyd/internal/store"
 	"github.com/arjunjaincs/decoyd/internal/triglog"
 	"github.com/arjunjaincs/decoyd/internal/tui"
+	"github.com/arjunjaincs/decoyd/internal/watch"
 )
 
 func main() {
@@ -64,7 +66,7 @@ func run(args []string) error {
 			if len(args) < 2 {
 				return fmt.Errorf("usage: decoyd remove <id>")
 			}
-			return cmdRemove(st, args[1])
+			return cmdRemove(st, dataDir, args[1])
 		default:
 			return fmt.Errorf("unknown command %q — run 'decoyd help' for usage", args[0])
 		}
@@ -138,17 +140,24 @@ func cmdList(st *store.Store) error {
 }
 
 // cmdRemove deletes a token record from the store by its ID.
-// It does NOT remove the deployed file from disk.
-func cmdRemove(st *store.Store, id string) error {
+// It does NOT remove the deployed file from disk (use --purge for that).
+func cmdRemove(st *store.Store, dataDir, id string) error {
 	// Verify the token exists first so we can give a clear error.
 	tok, err := st.GetToken(id)
 	if err != nil {
-		return fmt.Errorf("token %q not found in store", id)
+		if errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("no token with ID %q — run 'decoyd list' to see existing tokens", id)
+		}
+		return fmt.Errorf("look up token %q: %w", id, err)
 	}
 
 	if err := st.DeleteToken(id); err != nil {
 		return fmt.Errorf("delete token: %w", err)
 	}
+
+	// Update deployed_tokens.json so a running headless watcher stops
+	// watching this path immediately without needing a restart.
+	_ = watch.ReconcileSnapshot(st, dataDir)
 
 	fmt.Printf("Removed token %s (%s)\n", id, tok.Type)
 	if tok.DeployedPath != "" {

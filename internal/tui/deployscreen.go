@@ -3,6 +3,7 @@ package tui
 import (
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -293,11 +294,7 @@ func (m DeployModel) doDeploy(dryRun bool) (DeployModel, tea.Cmd) {
 
 	res, err := deploy.DeployToFile(tok, targetDir, deploy.Options{DryRun: dryRun})
 	if err != nil {
-		if errors.Is(err, deploy.ErrAlreadyExists) {
-			m.result = fmt.Sprintf("File already exists: %s\nDelete it first or choose a different directory.", res.DeployedTo)
-		} else {
-			m.result = "Deploy failed: " + err.Error()
-		}
+		m.result = deployErrMsg(err, targetDir, res.DeployedTo)
 		m.resultErr = true
 		m.state = deployStateDone
 		return m, nil
@@ -333,6 +330,34 @@ func (m DeployModel) doDeploy(dryRun bool) (DeployModel, tea.Cmd) {
 	m.resultErr = false
 	m.state = deployStateDone
 	return m, nil
+}
+
+// deployErrMsg converts a deploy.DeployToFile error into a plain-English
+// user-facing string.  It is a standalone function so it can be tested
+// without spinning up a full bubbletea model.
+//
+// deployedTo is the target file path (populated by DeployResult even on
+// ErrAlreadyExists).  targetDir is the destination directory chosen by the
+// user.
+func deployErrMsg(err error, targetDir, deployedTo string) string {
+	switch {
+	case errors.Is(err, deploy.ErrAlreadyExists):
+		return fmt.Sprintf(
+			"File already exists: %s\nDelete it first or choose a different directory.",
+			deployedTo)
+	case errors.Is(err, os.ErrPermission):
+		return fmt.Sprintf(
+			"No write access to %s.\nChoose a different folder or check your user permissions.",
+			targetDir)
+	case errors.Is(err, os.ErrInvalid):
+		return "Invalid path — check the directory name and try again."
+	default:
+		// Strip the "deploy: " package-internal prefix that deploy.go helpers
+		// add, so the user doesn't see Go package names in the error message.
+		msg := err.Error()
+		msg = strings.TrimPrefix(msg, "deploy: ")
+		return "Deploy failed: " + msg
+	}
 }
 
 // ----------------------------------------------------------------------------

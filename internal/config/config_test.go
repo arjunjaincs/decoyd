@@ -129,3 +129,48 @@ func TestDataDir_TableDriven(t *testing.T) {
 		})
 	}
 }
+
+// TestDataDir_MkdirAllError_FriendlyMessage verifies that when os.MkdirAll
+// fails (here: the target path already exists as a file, not a directory),
+// the returned error says "cannot create data directory" rather than exposing
+// a raw OS error string.
+//
+// This test is Linux-only because on Windows DataDir uses os.UserConfigDir
+// (APPDATA) which cannot be overridden via HOME, making it impossible to
+// force a controlled failure path without more complex OS mocking.
+func TestDataDir_MkdirAllError_FriendlyMessage(t *testing.T) {
+	if os.Getenv("GOOS") == "windows" {
+		t.Skip("skipping: cannot control APPDATA path on Windows")
+	}
+	// Detect actual runtime OS (os.Getenv("GOOS") is usually empty at runtime).
+	if isWindows() {
+		t.Skip("skipping: cannot control APPDATA path on Windows runtime")
+	}
+
+	// Create a temp dir, then place a FILE at the path where DataDir would
+	// try to create the .decoyd subdirectory. MkdirAll fails because the
+	// path is already occupied by a regular file.
+	tmpHome := t.TempDir()
+	blockPath := filepath.Join(tmpHome, AppNameLower)
+	if err := os.WriteFile(blockPath, []byte("block"), 0o600); err != nil {
+		t.Fatalf("setup: write block file: %v", err)
+	}
+
+	t.Setenv("HOME", tmpHome)
+
+	_, err := DataDir()
+	if err == nil {
+		t.Fatal("DataDir() succeeded; want error")
+	}
+
+	msg := err.Error()
+	if !strings.HasPrefix(msg, "cannot create data directory") {
+		t.Errorf("got error %q; want prefix \"cannot create data directory\"", msg)
+	}
+}
+
+// isWindows reports whether the current runtime OS is Windows without
+// depending on build tags (runtime.GOOS is set at compile time, not env).
+func isWindows() bool {
+	return os.PathSeparator == '\\'
+}

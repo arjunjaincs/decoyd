@@ -3,6 +3,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -29,19 +30,19 @@ func DataDir() (string, error) {
 	if runtime.GOOS == "windows" {
 		base, err := os.UserConfigDir()
 		if err != nil {
-			return "", err
+			return "", fmt.Errorf("cannot locate AppData directory: %w", err)
 		}
 		dir = filepath.Join(base, AppName)
 	} else {
 		home, err := os.UserHomeDir()
 		if err != nil {
-			return "", err
+			return "", fmt.Errorf("cannot locate home directory: %w", err)
 		}
 		dir = filepath.Join(home, AppNameLower)
 	}
 
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", err
+		return "", fmt.Errorf("cannot create data directory %s: %w", dir, err)
 	}
 
 	return dir, nil
