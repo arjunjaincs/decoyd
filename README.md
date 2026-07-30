@@ -74,22 +74,12 @@ Webhook URLs and bot tokens are masked (`••••last4`) when unfocused so s
 
 ### 4. Monitor and manage tokens
 
-1. Select **5. Status** from the main menu to see watcher state and recent trigger events
+1. Select **4. Status** from the main menu to see watcher state and recent trigger events
 2. `↑`/`↓` to scroll, `Enter` to drill into an event, `r` to refresh, `Esc` to go back
-3. Select **4. View tokens** to browse your full token list
 
-In the token list:
-- `d` — delete a token record (two-step confirmation if a deployed file exists — see below)
-- `e` — edit the Notes label inline
-- `a` — assign an alert channel to this token
-- `Esc` — back to menu
+To delete a token from the TUI, open **2. Deploy existing decoys** and press `d` on the token you want to remove. This removes the database record; the deployed file on disk is kept (use `decoyd remove --purge <id>` from the CLI to also delete the file).
 
-**Deleting a token with a deployed file** uses a two-step confirmation:
-1. First screen confirms deletion of the database record
-2. Second screen asks whether to also permanently delete the file on disk
-   - `y` — delete both the record and the file
-   - `n` — delete the record, leave the file on disk
-   - `Esc` — cancel everything; nothing is deleted
+For a full list of token records with their IDs, use `decoyd list` from the CLI.
 
 ---
 
@@ -128,9 +118,11 @@ After registration the watcher starts at next logon. The TUI's embedded watcher 
 | `Enter` | Confirm / cycle |
 | `Esc` | Back |
 | `?` | Help overlay |
-| `Ctrl+V` | Paste (in text fields) |
-| `Ctrl+C` | Copy current field content |
-| `q` / `Ctrl+C` | Quit (when not in a text field) |
+| `q` / `Ctrl+C` | Quit |
+
+**Paste in text fields:** paste works via your terminal's native paste gesture (Ctrl+Shift+V on most Linux terminals, right-click in many Windows terminals). On Windows legacy terminals (PowerShell 5.1, cmd.exe) Ctrl+V also reads directly from the clipboard.
+
+**Ctrl+C in text fields (Windows only):** when a text field is focused and non-empty, Ctrl+C copies the field content to the Windows clipboard instead of quitting. On Linux/macOS this shortcut quits normally regardless of focus — use your terminal's text selection to copy field content.
 
 ---
 
