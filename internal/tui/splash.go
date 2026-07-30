@@ -188,7 +188,8 @@ func (m SplashModel) View() string {
 	// Invisible (spaces) during wordmark phase so height doesn't change;
 	// appears as a dim line from pause phase onward.
 	var separatorRow string
-	if m.phase >= splashPhasePause {
+	if m.phase != splashPhaseWordmark {
+		// Pause phase onward: separator fades in.
 		sepLen := inner - 8
 		if sepLen < 4 {
 			sepLen = 4
@@ -198,8 +199,10 @@ func (m SplashModel) View() string {
 			lipgloss.NewStyle().Foreground(ColorBorder).Render(sep),
 		)
 	} else {
+		// splashPhaseWordmark: separator not yet visible — hold height constant.
 		separatorRow = center(" ")
 	}
+
 
 	// ── Row 3: Tagline ────────────────────────────────────────────────────
 	// Reserved blank until tagline phase, then typed letter by letter.

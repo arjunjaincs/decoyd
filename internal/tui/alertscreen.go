@@ -94,10 +94,8 @@ type AlertModel struct {
 
 	// spinner frame counter (used while alertStateSending)
 	spinFrame int
-
-	// tick counter for spinner
-	spinTick int
 }
+
 
 // spinnerFrames is the spinner used while the test send is in flight.
 // Braille frames are used when the terminal supports Unicode; ASCII rotation otherwise.

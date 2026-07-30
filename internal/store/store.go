@@ -11,6 +11,7 @@ import (
 	"time"
 
 	bolt "go.etcd.io/bbolt"
+	boltErrors "go.etcd.io/bbolt/errors"
 
 	"github.com/arjunjaincs/decoyd/internal/tokens"
 )
@@ -35,9 +36,9 @@ type Store struct {
 func Open(dbPath string) (*Store, error) {
 	db, err := bolt.Open(dbPath, 0o600, &bolt.Options{Timeout: 2 * time.Second})
 	if err != nil {
-		// bolt.ErrTimeout means another process already holds the exclusive
+		// boltErrors.ErrTimeout means another process already holds the exclusive
 		// lock on decoyd.db. Translate to a clear, actionable message.
-		if errors.Is(err, bolt.ErrTimeout) {
+		if errors.Is(err, boltErrors.ErrTimeout) {
 			return nil, errors.New(
 				"another instance of decoyd is already open — close it and try again")
 		}

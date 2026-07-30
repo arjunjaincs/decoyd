@@ -218,7 +218,8 @@ func (m StatusModel) View() string {
 	} else if m.flashMsg != "" {
 		b.WriteString(SelectedItemStyle().Render(m.flashMsg))
 	} else {
-		b.WriteString(HelpTextStyle.Render(G.NavUp + "/" + G.NavDown + " navigate  enter detail  r refresh  x clear all  esc back"))
+		b.WriteString(HelpTextStyle.Render(G.NavUp + "/" + G.NavDown + " navigate   enter detail   r refresh   x clear all   esc back"))
+
 	}
 
 	boxW := ScreenBoxWidth(m.width, 90)

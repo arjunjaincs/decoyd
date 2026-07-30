@@ -314,11 +314,11 @@ func (m GenerateModel) viewSelect() string {
 		if isCursor {
 			row = SelectedItemStyle().Render(markerStr) + checkbox + SelectedItemStyle().Render(" "+label)
 		} else {
-			row = NormalItemStyle.Render(markerStr+label) // marker always prints; checkbox inline
 			// Rebuild for non-cursor: marker + checkbox + label.
 			row = NormalItemStyle.Render(markerStr) + checkbox + NormalItemStyle.Render(" "+label)
 		}
 		sb.WriteString(row + "\n")
+
 	}
 
 	// Notes / label field.

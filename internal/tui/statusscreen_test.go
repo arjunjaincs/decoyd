@@ -210,11 +210,3 @@ func TestStatusModel_WatcherStateStale(t *testing.T) {
 	}
 }
 
-// ----------------------------------------------------------------------------
-// Helpers
-// ----------------------------------------------------------------------------
-
-// formatInt converts an int to its decimal string (stdlib-free, for test use).
-func formatInt(n int) string {
-	return fmt.Sprintf("%d", n)
-}

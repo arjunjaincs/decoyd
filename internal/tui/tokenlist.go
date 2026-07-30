@@ -456,7 +456,8 @@ func (m TokenListModel) viewConfirmPurge(boxW int) string {
 	sb.WriteString(MutedStyle.Render("  This cannot be undone.") + "\n")
 
 	content := strings.TrimRight(sb.String(), "\n")
-	box := renderBoxInner("Delete File — Are You Sure?", content, boxW, ColorDanger)
+	box := renderBoxInner("Delete File", content, boxW, ColorDanger)
+
 	footer := HelpTextStyle.Render("y/enter delete BOTH record+file   n delete record only   esc cancel all")
 	return lipgloss.JoinVertical(lipgloss.Left, box, footer)
 }

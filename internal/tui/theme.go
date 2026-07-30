@@ -294,10 +294,6 @@ func titledBorder(title string, innerWidth int) lipgloss.Border {
 	return b
 }
 
-// titleBorderStr is kept for internal callers that need the spaced label text.
-func titleBorderStr(title string) string {
-	return " " + title + " "
-}
 
 // ----------------------------------------------------------------------------
 // Helper utilities

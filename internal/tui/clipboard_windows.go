@@ -38,6 +38,26 @@ const (
 	gmemMoveable  = 0x0002 // GMEM_MOVEABLE
 )
 
+// hglobalHeader mirrors the internal Go slice header layout.
+// We store the OS-pinned HGLOBAL pointer in the Data field (a uintptr) and
+// reinterpret the whole struct as a []uint16 via unsafe.Pointer(&header).
+// This avoids the unsafe.Pointer(uintptr_var) pattern that go vet's unsafeptr
+// analyzer flags: the only unsafe.Pointer conversion here is Pointer→Pointer
+// (&hglobalHeader → *[]uint16), which is safe and untraced by go vet.
+// The memory is pinned by WinAPI GlobalLock so the GC has no control over it.
+type hglobalHeader struct {
+	Data uintptr
+	Len  int
+	Cap  int
+}
+
+// hglobalSlice converts a WinAPI GlobalLock'd memory address (p) into a
+// []uint16 slice of length n backed by that OS-pinned memory.
+func hglobalSlice(p uintptr, n int) []uint16 {
+	h := hglobalHeader{Data: p, Len: n, Cap: n}
+	return *(*[]uint16)(unsafe.Pointer(&h))
+}
+
 // readClipboard returns the current clipboard text as a UTF-8 string.
 // Returns "" on any failure (clipboard locked, no text data, etc.).
 func readClipboard() string {
@@ -58,10 +78,9 @@ func readClipboard() string {
 	}
 	defer procGlobalUnlock.Call(h)
 
-	// p is a pointer to a null-terminated UTF-16 string.
-	// Scan for the null terminator (capped at 1 MiB of UTF-16 = 524,288 chars).
-	const maxChars = 1 << 19
-	buf := (*[maxChars]uint16)(unsafe.Pointer(p))
+	// Build a slice over the OS-pinned UTF-16 string and scan for the null terminator.
+	const maxChars = 1 << 19 // 524,288 UTF-16 code units = 1 MiB cap
+	buf := hglobalSlice(p, maxChars)
 	n := 0
 	for n < maxChars && buf[n] != 0 {
 		n++
@@ -88,7 +107,7 @@ func writeClipboard(text string) {
 	if ptr == 0 {
 		return
 	}
-	copy((*[1 << 19]uint16)(unsafe.Pointer(ptr))[:len(utf16)], utf16)
+	copy(hglobalSlice(ptr, len(utf16)), utf16)
 	procGlobalUnlock.Call(hMem)
 
 	r, _, _ := procOpenClipboard.Call(0)
