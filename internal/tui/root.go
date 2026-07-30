@@ -253,7 +253,11 @@ func (m RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusScreen = NewStatusModel(m.width, m.height, m.dataDir, m.watcher)
 			m.current = ScreenStatus
 			return m, m.statusScreen.Init()
-		case 4: // Quit
+		case 4: // View tokens (Phase 2 — manage deployed tokens)
+			m.tokenList = NewTokenListModel(m.width, m.height, m.st, m.dataDir)
+			m.current = ScreenTokenList
+			return m, m.tokenList.Init()
+		case 5: // Quit
 			// Stop the embedded watcher before quitting so the PID file is
 			// cleaned up and the lock released.
 			if m.watcher != nil {

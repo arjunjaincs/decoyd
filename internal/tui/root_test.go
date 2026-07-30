@@ -167,11 +167,11 @@ func TestRootModel_NarrowTerminal(t *testing.T) {
 	}
 }
 
-// TestRootModel_MenuActionQuit verifies that MenuActionMsg{Index:4} (Quit)
-// produces a tea.Quit command.
+// TestRootModel_MenuActionQuit verifies that MenuActionMsg{Index:5} (Quit —
+// now item 6 after "View tokens" was added as item 5) produces a tea.Quit command.
 func TestRootModel_MenuActionQuit(t *testing.T) {
 	m := newTestRoot(false)
-	_, cmd := m.Update(MenuActionMsg{Index: 4})
+	_, cmd := m.Update(MenuActionMsg{Index: 5})
 	if cmd == nil {
 		t.Fatal("Quit menu action returned nil command; want tea.Quit")
 	}
@@ -269,3 +269,71 @@ func TestRootModel_TokenListDoneReturnsToMenu(t *testing.T) {
 		t.Errorf("TokenListDoneMsg → screen %v; want ScreenMainMenu", root.current)
 	}
 }
+
+// TestRootModel_TokenListNavigation verifies that MenuActionMsg{Index:4}
+// ("View tokens", shortcut 5) transitions to ScreenTokenList.
+func TestRootModel_TokenListNavigation(t *testing.T) {
+	m := newTestRoot(false)
+	updated, _ := m.Update(MenuActionMsg{Index: 4})
+	root := updated.(RootModel)
+	if root.current != ScreenTokenList {
+		t.Errorf("MenuActionMsg{4} → screen %v; want ScreenTokenList", root.current)
+	}
+}
+
+// TestRootModel_TokenListReachableViaKeyPress is the genuine end-to-end
+// reachability test: it simulates a user pressing the "5" key from the main
+// menu (the shortcut for "View tokens") and confirms the root model transitions
+// to ScreenTokenList.  This is the class of test that would have caught the
+// bug where ScreenTokenList was constructed but never navigated to.
+func TestRootModel_TokenListReachableViaKeyPress(t *testing.T) {
+	m := newTestRoot(false)
+	if m.current != ScreenMainMenu {
+		t.Fatalf("precondition: not on main menu (state=%v)", m.current)
+	}
+
+	// Deliver the "5" key press — same event a real user generates.
+	updated, cmd := m.mainMenu.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("5")})
+	m.mainMenu = updated.(MainMenuModel)
+
+	// cmd should be a MenuActionMsg{Index:4} command.
+	if cmd == nil {
+		t.Fatal("pressing '5' on main menu returned nil cmd; want MenuActionMsg command")
+	}
+	msg := cmd()
+	action, ok := msg.(MenuActionMsg)
+	if !ok {
+		t.Fatalf("'5' key produced msg type %T; want MenuActionMsg", msg)
+	}
+	if action.Index != 4 {
+		t.Fatalf("'5' key → MenuActionMsg{%d}; want index 4 (View tokens)", action.Index)
+	}
+
+	// Deliver the resulting MenuActionMsg to the root model.
+	updated2, _ := m.Update(action)
+	root := updated2.(RootModel)
+	if root.current != ScreenTokenList {
+		t.Errorf("'5' key → screen %v; want ScreenTokenList", root.current)
+	}
+}
+
+// TestRootModel_TokenListRoundTrip verifies the full round-trip:
+// navigate to ScreenTokenList via menu action, then esc back to ScreenMainMenu.
+func TestRootModel_TokenListRoundTrip(t *testing.T) {
+	m := newTestRoot(false)
+
+	// Navigate to token list.
+	updated, _ := m.Update(MenuActionMsg{Index: 4})
+	root := updated.(RootModel)
+	if root.current != ScreenTokenList {
+		t.Fatalf("precondition: MenuActionMsg{4} → screen %v; want ScreenTokenList", root.current)
+	}
+
+	// Send TokenListDoneMsg (triggered by esc on the token list screen).
+	updated, _ = root.Update(TokenListDoneMsg{})
+	root = updated.(RootModel)
+	if root.current != ScreenMainMenu {
+		t.Errorf("TokenListDoneMsg → screen %v; want ScreenMainMenu", root.current)
+	}
+}
+

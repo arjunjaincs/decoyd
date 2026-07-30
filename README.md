@@ -77,9 +77,15 @@ Webhook URLs and bot tokens are masked (`••••last4`) when unfocused so s
 1. Select **4. Status** from the main menu to see watcher state and recent trigger events
 2. `↑`/`↓` to scroll, `Enter` to drill into an event, `r` to refresh, `Esc` to go back
 
-To delete a token from the TUI, open **2. Deploy existing decoys** and press `d` on the token you want to remove. This removes the database record; the deployed file on disk is kept (use `decoyd remove --purge <id>` from the CLI to also delete the file).
+**5. View tokens** opens the full token management screen:
 
-For a full list of token records with their IDs, use `decoyd list` from the CLI.
+- `d` — delete a token (one confirm if no deployed file; two-step if a file exists)
+  - Second confirm: `y` — delete record **and** file | `n` — record only | `Esc` — cancel all
+- `e` — edit the Notes label inline
+- `a` — assign a specific alert channel to this token
+- `Esc` — back to menu
+
+For a full token list with IDs from the CLI: `decoyd list`.
 
 ---
 

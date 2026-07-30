@@ -24,7 +24,8 @@ var mainMenuItems = []menuItem{
 	{label: "Deploy existing decoys", shortcut: "2"},
 	{label: "Alert settings",        shortcut: "3"},
 	{label: "Status",                shortcut: "4"},
-	{label: "Quit",                  shortcut: "5"},
+	{label: "View tokens",           shortcut: "5"},
+	{label: "Quit",                  shortcut: "6"},
 }
 
 // menuBoxMaxInner is the maximum content-area width of the menu card.
@@ -120,8 +121,8 @@ func (m MainMenuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.cursor++
 			}
 
-		// Number shortcuts.
-		case "1", "2", "3", "4", "5":
+		// Number shortcuts: one key per item (1–6).
+		case "1", "2", "3", "4", "5", "6":
 			idx := int(msg.String()[0] - '1') // '1' → 0
 			if idx < len(mainMenuItems) {
 				m.cursor = idx
