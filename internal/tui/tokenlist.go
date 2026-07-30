@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -27,10 +28,11 @@ type TokenListDoneMsg struct{}
 type tokenListState int
 
 const (
-	tokenListStateBrowse   tokenListState = iota // browsing the list
-	tokenListStateConfDel                        // confirming a delete
-	tokenListStateEdit                           // editing the Notes field
-	tokenListStateAssign                         // picking an alert channel
+	tokenListStateBrowse    tokenListState = iota // browsing the list
+	tokenListStateConfDel                         // first confirm: delete record?
+	tokenListStateConfPurge                       // second confirm: also delete file?
+	tokenListStateEdit                            // editing the Notes field
+	tokenListStateAssign                          // picking an alert channel
 )
 
 // ----------------------------------------------------------------------------
@@ -90,6 +92,8 @@ func (m TokenListModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateBrowse(msg)
 		case tokenListStateConfDel:
 			return m.updateConfirmDelete(msg)
+		case tokenListStateConfPurge:
+			return m.updateConfirmPurge(msg)
 		case tokenListStateEdit:
 			return m.updateEdit(msg)
 		case tokenListStateAssign:
@@ -147,6 +151,13 @@ func (m TokenListModel) updateConfirmDelete(msg tea.KeyMsg) (TokenListModel, tea
 			return m, nil
 		}
 		tok := m.all[m.cursor]
+		// If the token has a deployed file, ask a second question before
+		// deleting anything — file deletion is more serious than a DB record.
+		if tok.DeployedPath != "" {
+			m.state = tokenListStateConfPurge
+			return m, nil
+		}
+		// No deployed file: delete the record directly (original behavior).
 		var err error
 		if m.st != nil {
 			err = m.st.DeleteToken(tok.ID)
@@ -156,13 +167,70 @@ func (m TokenListModel) updateConfirmDelete(msg tea.KeyMsg) (TokenListModel, tea
 		} else {
 			m.notice = lipgloss.NewStyle().Foreground(ColorPrimary).Render(
 				fmt.Sprintf("Deleted token %s (%s)", tok.ID, tok.Type))
-			// Update deployed_tokens.json so any running headless watcher
-			// stops watching the deleted token's path immediately.
 			_ = watch.ReconcileSnapshot(m.st, m.dataDir)
 		}
 		m.reload()
 		m.state = tokenListStateBrowse
 	case "n", "esc":
+		m.state = tokenListStateBrowse
+	}
+	return m, nil
+}
+
+// updateConfirmPurge handles the second (heavier) confirmation when the token
+// has a deployed file:
+//
+//	y / enter  — delete record + file on disk
+//	n          — delete record only (file is kept)
+//	esc        — cancel: nothing is deleted
+func (m TokenListModel) updateConfirmPurge(msg tea.KeyMsg) (TokenListModel, tea.Cmd) {
+	if len(m.all) == 0 {
+		m.state = tokenListStateBrowse
+		return m, nil
+	}
+	tok := m.all[m.cursor]
+	switch msg.String() {
+	case "y", "enter":
+		// Delete record.
+		if m.st != nil {
+			if err := m.st.DeleteToken(tok.ID); err != nil {
+				m.notice = ErrorStyle.Render("Delete failed: " + err.Error())
+				m.state = tokenListStateBrowse
+				return m, nil
+			}
+			_ = watch.ReconcileSnapshot(m.st, m.dataDir)
+		}
+		// Delete file.
+		fileErr := os.Remove(tok.DeployedPath)
+		switch {
+		case fileErr == nil:
+			m.notice = lipgloss.NewStyle().Foreground(ColorPrimary).Render(
+				fmt.Sprintf("Deleted record and file: %s", tok.DeployedPath))
+		case os.IsNotExist(fileErr):
+			m.notice = lipgloss.NewStyle().Foreground(ColorPrimary).Render(
+				"Record deleted. File was already gone from disk.")
+		default:
+			m.notice = WarningStyle.Render(
+				fmt.Sprintf("Record deleted, but could not remove file: %v", fileErr))
+		}
+		m.reload()
+		m.state = tokenListStateBrowse
+	case "n":
+		// Delete record only — user explicitly chose to keep the file.
+		if m.st != nil {
+			if err := m.st.DeleteToken(tok.ID); err != nil {
+				m.notice = ErrorStyle.Render("Delete failed: " + err.Error())
+				m.state = tokenListStateBrowse
+				return m, nil
+			}
+			_ = watch.ReconcileSnapshot(m.st, m.dataDir)
+		}
+		m.notice = lipgloss.NewStyle().Foreground(ColorPrimary).Render(
+			fmt.Sprintf("Deleted record. File at %s was kept.", tok.DeployedPath))
+		m.reload()
+		m.state = tokenListStateBrowse
+	case "esc":
+		// Full cancel — nothing deleted.
 		m.state = tokenListStateBrowse
 	}
 	return m, nil
@@ -261,13 +329,16 @@ func (m TokenListModel) View() string {
 	boxW := ScreenBoxWidth(m.width, 92)
 
 	var content string
-	if m.state == tokenListStateConfDel && len(m.all) > 0 {
+	switch {
+	case m.state == tokenListStateConfDel && len(m.all) > 0:
 		content = m.viewConfirmDelete(boxW)
-	} else if m.state == tokenListStateEdit && len(m.all) > 0 {
+	case m.state == tokenListStateConfPurge && len(m.all) > 0:
+		content = m.viewConfirmPurge(boxW)
+	case m.state == tokenListStateEdit && len(m.all) > 0:
 		content = m.viewEdit(boxW)
-	} else if m.state == tokenListStateAssign && len(m.all) > 0 {
+	case m.state == tokenListStateAssign && len(m.all) > 0:
 		content = m.viewAssign(boxW)
-	} else {
+	default:
 		content = m.viewTable(boxW)
 	}
 	return PlaceScreen(m.width, m.height, content)
@@ -362,12 +433,31 @@ func (m TokenListModel) viewConfirmDelete(boxW int) string {
 	sb.WriteString(MutedStyle.Render("  Type: ") + NormalItemStyle.Render(tok.Type) + "\n")
 	if tok.DeployedPath != "" {
 		sb.WriteString(MutedStyle.Render("  Path: ") + NormalItemStyle.Render(tok.DeployedPath) + "\n")
-		sb.WriteString("\n" + MutedStyle.Render("  Note: the deployed file is NOT removed from disk.") + "\n")
+		sb.WriteString("\n" + MutedStyle.Render("  A deployed file exists — you'll be asked about it next.") + "\n")
 	}
 
 	content := strings.TrimRight(sb.String(), "\n")
 	box := renderBoxInner("Delete Token", content, boxW, ColorDanger)
 	footer := HelpTextStyle.Render("y/enter confirm   n/esc cancel")
+	return lipgloss.JoinVertical(lipgloss.Left, box, footer)
+}
+
+// viewConfirmPurge is the second, heavier confirmation screen shown when the
+// token has a deployed file on disk. The user chooses between:
+//
+//	y  — delete record AND the file (purge)
+//	n  — delete record only, keep the file
+//	esc — cancel: nothing is deleted
+func (m TokenListModel) viewConfirmPurge(boxW int) string {
+	tok := m.all[m.cursor]
+	var sb strings.Builder
+	sb.WriteString(ErrorStyle.Render("  Permanently delete this file from disk?") + "\n\n")
+	sb.WriteString(MutedStyle.Render("  ") + NormalItemStyle.Render(tok.DeployedPath) + "\n\n")
+	sb.WriteString(MutedStyle.Render("  This cannot be undone.") + "\n")
+
+	content := strings.TrimRight(sb.String(), "\n")
+	box := renderBoxInner("Delete File — Are You Sure?", content, boxW, ColorDanger)
+	footer := HelpTextStyle.Render("y/enter delete BOTH record+file   n delete record only   esc cancel all")
 	return lipgloss.JoinVertical(lipgloss.Left, box, footer)
 }
 

@@ -63,10 +63,20 @@ func run(args []string) error {
 		case "list":
 			return cmdList(st)
 		case "remove":
-			if len(args) < 2 {
-				return fmt.Errorf("usage: decoyd remove <id>")
+			// Parse optional --purge flag from remaining args.
+			purge := false
+			remaining := args[1:]
+			for i, a := range remaining {
+				if a == "--purge" || a == "-purge" {
+					purge = true
+					remaining = append(remaining[:i], remaining[i+1:]...)
+					break
+				}
 			}
-			return cmdRemove(st, dataDir, args[1])
+			if len(remaining) < 1 {
+				return fmt.Errorf("usage: decoyd remove [--purge] <id>")
+			}
+			return cmdRemove(st, dataDir, remaining[0], purge)
 		default:
 			return fmt.Errorf("unknown command %q — run 'decoyd help' for usage", args[0])
 		}
@@ -140,8 +150,9 @@ func cmdList(st *store.Store) error {
 }
 
 // cmdRemove deletes a token record from the store by its ID.
-// It does NOT remove the deployed file from disk (use --purge for that).
-func cmdRemove(st *store.Store, dataDir, id string) error {
+// When purge is true it also deletes the deployed file at tok.DeployedPath.
+// A missing file on disk is noted but not treated as an error.
+func cmdRemove(st *store.Store, dataDir, id string, purge bool) error {
 	// Verify the token exists first so we can give a clear error.
 	tok, err := st.GetToken(id)
 	if err != nil {
@@ -160,8 +171,30 @@ func cmdRemove(st *store.Store, dataDir, id string) error {
 	_ = watch.ReconcileSnapshot(st, dataDir)
 
 	fmt.Printf("Removed token %s (%s)\n", id, tok.Type)
-	if tok.DeployedPath != "" {
-		fmt.Printf("Note: deployed file at %s was NOT removed from disk.\n", tok.DeployedPath)
+
+	if tok.DeployedPath == "" {
+		// No deployed file — nothing more to do regardless of --purge.
+		if purge {
+			fmt.Println("Note: no deployed file recorded for this token.")
+		}
+		return nil
+	}
+
+	if !purge {
+		fmt.Printf("Note: deployed file at %s was NOT removed.\n", tok.DeployedPath)
+		fmt.Println("      Use --purge to also delete it: decoyd remove --purge " + id)
+		return nil
+	}
+
+	// --purge: delete the file.
+	if err := os.Remove(tok.DeployedPath); err != nil {
+		if os.IsNotExist(err) {
+			fmt.Printf("Note: deployed file at %s was already gone (not on disk).\n", tok.DeployedPath)
+		} else {
+			fmt.Printf("Warning: could not delete %s: %v\n", tok.DeployedPath, err)
+		}
+	} else {
+		fmt.Printf("Deleted deployed file: %s\n", tok.DeployedPath)
 	}
 	return nil
 }
@@ -192,14 +225,15 @@ func printUsage() {
 	fmt.Print(`Usage: decoyd [command]
 
 Commands:
-  (none)          Launch the interactive TUI
-  list            Print all token records in a tab-aligned table
-  remove <id>     Delete a token record from the store (deployed file is NOT removed)
-  watch           Run the headless file watcher (alert on token access)
-  install         Install decoyd watch as a system service (systemd on Linux,
-                  Task Scheduler on Windows)
-  triggers        Print recent trigger events
-  help            Show this help
+  (none)             Launch the interactive TUI
+  list               Print all token records in a tab-aligned table
+  remove <id>        Delete a token record (deployed file is NOT removed)
+  remove --purge <id> Delete a token record AND its deployed file from disk
+  watch              Run the headless file watcher (alert on token access)
+  install            Install decoyd watch as a system service (systemd on Linux,
+                     Task Scheduler on Windows)
+  triggers           Print recent trigger events
+  help               Show this help
 
 Data directory:
   Linux:    ~/.decoyd/
