@@ -844,4 +844,3 @@ func TestMultiChannel_RoundTrip(t *testing.T) {
 		t.Errorf("DefaultID %q does not match any channel ID", loaded.DefaultID)
 	}
 }
-

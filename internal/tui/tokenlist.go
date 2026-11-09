@@ -41,20 +41,20 @@ const (
 
 // TokenListModel is the bubbletea model for the "Deployed Tokens" list screen.
 type TokenListModel struct {
-	width  int
-	height int
+	width   int
+	height  int
 	st      *store.Store
 	dataDir string // for loading alert config
-	all    []tokens.Token
-	cursor int
-	state  tokenListState
-	notice string // brief status line shown below the table
+	all     []tokens.Token
+	cursor  int
+	state   tokenListState
+	notice  string // brief status line shown below the table
 	// Edit state — holds the in-progress rune buffer for the Notes field.
 	editBuf []rune
 	editPos int
 	// Assign state — channel picker.
-	alertCfg    alert.AlertConfig // refreshed when entering assign state
-	assignCursor int              // cursor within channel picker
+	alertCfg     alert.AlertConfig // refreshed when entering assign state
+	assignCursor int               // cursor within channel picker
 }
 
 // NewTokenListModel creates a fresh model, loading all tokens from the store.
@@ -141,7 +141,6 @@ func (m TokenListModel) updateBrowse(msg tea.KeyMsg) (TokenListModel, tea.Cmd) {
 	}
 	return m, nil
 }
-
 
 func (m TokenListModel) updateConfirmDelete(msg tea.KeyMsg) (TokenListModel, tea.Cmd) {
 	switch msg.String() {
@@ -612,4 +611,3 @@ func (m TokenListModel) viewAssign(boxW int) string {
 	footer := HelpTextStyle.Render(G.NavUp + "/" + G.NavDown + " choose   enter confirm   esc cancel   " + G.Star + " = default   " + G.OK + " = current")
 	return lipgloss.JoinVertical(lipgloss.Left, box, footer)
 }
-

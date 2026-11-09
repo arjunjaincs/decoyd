@@ -29,12 +29,12 @@ type DeployScreenDoneMsg struct{}
 type deployState int
 
 const (
-	deployStatePickToken    deployState = iota // select which token to deploy
-	deployStatePickPath                        // pick destination (preset or custom)
-	deployStateCustomPath                      // typing a custom path
-	deployStateConfirm                         // confirm before writing
-	deployStateDone                            // result shown
-	deployStateConfirmDelete                   // confirming record deletion from picker
+	deployStatePickToken     deployState = iota // select which token to deploy
+	deployStatePickPath                         // pick destination (preset or custom)
+	deployStateCustomPath                       // typing a custom path
+	deployStateConfirm                          // confirm before writing
+	deployStateDone                             // result shown
+	deployStateConfirmDelete                    // confirming record deletion from picker
 )
 
 // ----------------------------------------------------------------------------
@@ -55,7 +55,7 @@ type DeployModel struct {
 
 	// Path picker
 	presets   []deploy.PresetDir
-	pathCur   int  // cursor in presets; len(presets) = custom input
+	pathCur   int // cursor in presets; len(presets) = custom input
 	customBuf []rune
 	customPos int
 

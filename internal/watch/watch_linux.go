@@ -47,13 +47,13 @@ type linuxWatcher struct {
 
 	mu      sync.Mutex
 	running bool
-	count   int // number of files currently watched
+	count   int    // number of files currently watched
 	release func() // releases the watcher.pid lock; nil when not running
 
 	// inotify and self-pipe fds; both -1 when not running.
-	inoFD  int
-	stopR  int // read end of stop pipe
-	stopW  int // write end of stop pipe
+	inoFD int
+	stopR int // read end of stop pipe
+	stopW int // write end of stop pipe
 
 	// stopCh is closed by stop() to signal the event loop.
 	stopCh chan struct{}
@@ -207,7 +207,6 @@ func (w *linuxWatcher) status() WatcherStatus {
 // eventLoop
 // ----------------------------------------------------------------------------
 
-
 func (w *linuxWatcher) eventLoop(wdMap map[int32]DeployedToken, mask uint32) {
 	defer close(w.done)
 
@@ -223,8 +222,8 @@ func (w *linuxWatcher) eventLoop(wdMap map[int32]DeployedToken, mask uint32) {
 	// Inotify event buffer: 4096 bytes, each event is ≥ unix.SizeofInotifyEvent bytes.
 	buf := make([]byte, 4096)
 
-	debounce := make(map[string]*debounceEntry)  // deployedPath → entry
-	rateMap := make(map[string]*rateEntry)        // tokenID → entry
+	debounce := make(map[string]*debounceEntry) // deployedPath → entry
+	rateMap := make(map[string]*rateEntry)      // tokenID → entry
 	var debounceTimer <-chan time.Time
 
 	fds := []unix.PollFd{

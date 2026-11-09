@@ -40,9 +40,9 @@ const (
 // Tick messages (unexported — internal to the splash screen only)
 // ----------------------------------------------------------------------------
 
-type splashWordTickMsg  struct{} // advance wordmark typewriter one rune
+type splashWordTickMsg struct{}  // advance wordmark typewriter one rune
 type splashPauseTickMsg struct{} // fire after the post-wordmark pause
-type splashTagTickMsg   struct{} // advance tagline typewriter one rune
+type splashTagTickMsg struct{}   // advance tagline typewriter one rune
 type splashBlinkTickMsg struct{} // toggle prompt blink state
 
 // ----------------------------------------------------------------------------
@@ -202,7 +202,6 @@ func (m SplashModel) View() string {
 		// splashPhaseWordmark: separator not yet visible — hold height constant.
 		separatorRow = center(" ")
 	}
-
 
 	// ── Row 3: Tagline ────────────────────────────────────────────────────
 	// Reserved blank until tagline phase, then typed letter by letter.

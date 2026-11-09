@@ -42,11 +42,11 @@ func PermForType(tokenType string) os.FileMode {
 
 // DeployResult carries the outcome of a single deploy operation.
 type DeployResult struct {
-	Token        tokens.Token
-	DeployedTo   string // absolute path of the primary written file
-	ExtraFiles   []string // additional files written (e.g. id_ed25519.pub)
-	DryRun       bool   // true ⇒ nothing was written, result is a preview
-	WouldCreate  bool   // only meaningful when DryRun == true
+	Token       tokens.Token
+	DeployedTo  string   // absolute path of the primary written file
+	ExtraFiles  []string // additional files written (e.g. id_ed25519.pub)
+	DryRun      bool     // true ⇒ nothing was written, result is a preview
+	WouldCreate bool     // only meaningful when DryRun == true
 }
 
 // Options controls how DeployToFile behaves.
@@ -140,9 +140,9 @@ func deploySSHKeyPair(t tokens.Token, targetDir string, opts Options) (DeployRes
 	}
 
 	res := DeployResult{
-		Token:       t,
-		DeployedTo:  privDest,
-		ExtraFiles:  []string{pubDest},
+		Token:      t,
+		DeployedTo: privDest,
+		ExtraFiles: []string{pubDest},
 	}
 
 	if opts.DryRun {

@@ -16,8 +16,9 @@ func findChannelIdx(channelType string) int {
 }
 
 // TestAlertChannelCyclePreservesCredentials is the regression test for:
-//   configure Discord, fire test-send, cycle to another channel, cycle back —
-//   URL field is now empty.
+//
+//	configure Discord, fire test-send, cycle to another channel, cycle back —
+//	URL field is now empty.
 //
 // Root cause: channel cycling called m.primaryBuf = nil unconditionally.
 // Fix: loadChannelFields() restores from savedChannels cache on every cycle.

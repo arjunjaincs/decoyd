@@ -42,15 +42,15 @@ type glyphs struct {
 	Arrow   string // → or ->
 
 	// Cursor / selection
-	Cursor  string // ▸ or >
+	Cursor string // ▸ or >
 
 	// Status icons
-	OK      string // ✓ or [ok]
-	Fail    string // ✗ or [x]
-	Warn    string // ⚠ or [!]
-	Bullet  string // ● or *
-	Empty   string // ○ or o
-	Star    string // ★ or *
+	OK     string // ✓ or [ok]
+	Fail   string // ✗ or [x]
+	Warn   string // ⚠ or [!]
+	Bullet string // ● or *
+	Empty  string // ○ or o
+	Star   string // ★ or *
 
 	// Text
 	Ellipsis string // … or ...
@@ -64,35 +64,35 @@ type glyphs struct {
 var G = func() glyphs {
 	if HasUnicode {
 		return glyphs{
-			NavUp:   "\u2191", // ↑
-			NavDown: "\u2193", // ↓
-			Arrow:   "\u2192", // →
-			Cursor:  "\u25b8", // ▸
-			OK:      "\u2713", // ✓
-			Fail:    "\u2717", // ✗
-			Warn:    "\u26a0", // ⚠
-			Bullet:  "\u25cf", // ●
-			Empty:   "\u25cb", // ○
-			Star:    "\u2605", // ★
+			NavUp:    "\u2191", // ↑
+			NavDown:  "\u2193", // ↓
+			Arrow:    "\u2192", // →
+			Cursor:   "\u25b8", // ▸
+			OK:       "\u2713", // ✓
+			Fail:     "\u2717", // ✗
+			Warn:     "\u26a0", // ⚠
+			Bullet:   "\u25cf", // ●
+			Empty:    "\u25cb", // ○
+			Star:     "\u2605", // ★
 			Ellipsis: "\u2026", // …
-			Dot:     "\u00b7", // ·
-			Horiz:   "\u2500", // ─
+			Dot:      "\u00b7", // ·
+			Horiz:    "\u2500", // ─
 		}
 	}
 	return glyphs{
-		NavUp:   "^",
-		NavDown: "v",
-		Arrow:   "->",
-		Cursor:  ">",
-		OK:      "[ok]",
-		Fail:    "[x]",
-		Warn:    "[!]",
-		Bullet:  "*",
-		Empty:   "o",
-		Star:    "*",
+		NavUp:    "^",
+		NavDown:  "v",
+		Arrow:    "->",
+		Cursor:   ">",
+		OK:       "[ok]",
+		Fail:     "[x]",
+		Warn:     "[!]",
+		Bullet:   "*",
+		Empty:    "o",
+		Star:     "*",
 		Ellipsis: "...",
-		Dot:     ".",
-		Horiz:   "-",
+		Dot:      ".",
+		Horiz:    "-",
 	}
 }()
 
@@ -293,7 +293,6 @@ func titledBorder(title string, innerWidth int) lipgloss.Border {
 	b.Top = top
 	return b
 }
-
 
 // ----------------------------------------------------------------------------
 // Helper utilities

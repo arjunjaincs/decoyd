@@ -13,5 +13,5 @@ package tui
 // xclip/xsel/pbcopy are not guaranteed to be present; users on those platforms
 // can select+copy text using their terminal's native selection mechanism.
 
-func readClipboard() string  { return "" }
+func readClipboard() string   { return "" }
 func writeClipboard(_ string) {}

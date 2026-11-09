@@ -20,12 +20,12 @@ type menuItem struct {
 }
 
 var mainMenuItems = []menuItem{
-	{label: "Generate a decoy",      shortcut: "1"},
+	{label: "Generate a decoy", shortcut: "1"},
 	{label: "Deploy existing decoys", shortcut: "2"},
-	{label: "Alert settings",        shortcut: "3"},
-	{label: "Status",                shortcut: "4"},
-	{label: "View tokens",           shortcut: "5"},
-	{label: "Quit",                  shortcut: "6"},
+	{label: "Alert settings", shortcut: "3"},
+	{label: "Status", shortcut: "4"},
+	{label: "View tokens", shortcut: "5"},
+	{label: "Quit", shortcut: "6"},
 }
 
 // menuBoxMaxInner is the maximum content-area width of the menu card.
@@ -51,18 +51,19 @@ const menuPulseInterval = 380 * time.Millisecond
 // pulseFrames cycles through cursor marker variants to create a visible pulse.
 //
 // Character choices — why these specific code points:
-//   Unicode mode: » (U+00BB, RIGHT-POINTING DOUBLE ANGLE QUOTATION MARK) and
-//   › (U+203A, SINGLE RIGHT-POINTING ANGLE QUOTATION MARK).
-//   Both are Latin-1 Supplement / General Punctuation — present in EVERY
-//   Windows console font including Consolas, Lucida Console, Terminal, and all
-//   OEM fonts. The Geometric Shapes block (▶ U+25B6, ▷ U+25B7) is incomplete
-//   in Consolas and absent from many legacy fonts, rendering as tofu boxes.
-//   The Arrows block (↑↓) is reliable but single-line arrows lack the visual
-//   weight difference needed for an obvious animation.
-//   The » ↔ › alternation gives a clear double-chevron → single-chevron pulse:
-//   bolder on even frames, lighter on odd frames — visually unmistakable.
 //
-//   ASCII mode: ">" static (no animation possible without VT).
+//	Unicode mode: » (U+00BB, RIGHT-POINTING DOUBLE ANGLE QUOTATION MARK) and
+//	› (U+203A, SINGLE RIGHT-POINTING ANGLE QUOTATION MARK).
+//	Both are Latin-1 Supplement / General Punctuation — present in EVERY
+//	Windows console font including Consolas, Lucida Console, Terminal, and all
+//	OEM fonts. The Geometric Shapes block (▶ U+25B6, ▷ U+25B7) is incomplete
+//	in Consolas and absent from many legacy fonts, rendering as tofu boxes.
+//	The Arrows block (↑↓) is reliable but single-line arrows lack the visual
+//	weight difference needed for an obvious animation.
+//	The » ↔ › alternation gives a clear double-chevron → single-chevron pulse:
+//	bolder on even frames, lighter on odd frames — visually unmistakable.
+//
+//	ASCII mode: ">" static (no animation possible without VT).
 var pulseFrames = func() []string {
 	if HasUnicode {
 		return []string{"\u00bb ", "\u203a ", "\u00bb ", "\u203a "}
@@ -133,8 +134,8 @@ func (m MainMenuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter":
 			return m, sendMenuAction(m.cursor)
 
-		// q / Ctrl+C are handled by the root model via its global key filter.
-		// ? is handled by root as well.
+			// q / Ctrl+C are handled by the root model via its global key filter.
+			// ? is handled by root as well.
 		}
 	}
 	return m, nil

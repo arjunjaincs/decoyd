@@ -303,7 +303,7 @@ func (m GenerateModel) viewSelect() string {
 		// Checkbox.
 		var checkbox string
 		if isSelected {
-			checkbox = lipgloss.NewStyle().Foreground(ColorPrimary).Bold(true).Render("["+G.OK+"]")
+			checkbox = lipgloss.NewStyle().Foreground(ColorPrimary).Bold(true).Render("[" + G.OK + "]")
 		} else {
 			checkbox = MutedStyle.Render("[ ]")
 		}
@@ -409,7 +409,7 @@ func (m GenerateModel) viewDone() string {
 		sb.WriteString(WarningStyle.Render(fmt.Sprintf("  %d token(s) failed — check logs.", failed)) + "\n")
 	}
 
-	sb.WriteString("\n" + MutedStyle.Render("  Deploy from the main menu " + G.Arrow + " Deploy existing decoys."))
+	sb.WriteString("\n" + MutedStyle.Render("  Deploy from the main menu "+G.Arrow+" Deploy existing decoys."))
 
 	content := strings.TrimRight(sb.String(), "\n")
 

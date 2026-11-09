@@ -54,8 +54,6 @@ type debounceEntry struct {
 	expiry time.Time // dispatch alert at or after this time
 }
 
-
-
 // inQuietHours reports whether the watcher should suppress alerts at now.
 func (c WatcherConfig) inQuietHours(now time.Time) bool {
 	if !c.QuietHoursEnabled {

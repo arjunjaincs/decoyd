@@ -336,4 +336,3 @@ func TestRootModel_TokenListRoundTrip(t *testing.T) {
 		t.Errorf("TokenListDoneMsg → screen %v; want ScreenMainMenu", root.current)
 	}
 }
-
