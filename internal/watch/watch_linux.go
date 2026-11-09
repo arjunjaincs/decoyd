@@ -373,6 +373,34 @@ func inotifyEventType(mask uint32) string {
 	}
 }
 
+// sendSuppressionAlert sends a single alert informing the user that further
+// events for this token are suppressed until the current rate-limit window expires.
+// It is called at most once per token per window (guarded by rateEntry.alertSent).
+func (w *linuxWatcher) sendSuppressionAlert(tok DeployedToken, now time.Time) {
+	alertCfg, err := alert.Load(w.dataDir)
+	if err != nil {
+		return
+	}
+	ch, ok := alertCfg.ChannelForToken(tok.AlertChannelID)
+	if !ok {
+		return
+	}
+	a, err := alert.NewAlerter(ch)
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+	payload := alert.AlertPayload{
+		TokenID:     sanitize.Sanitize(tok.ID, 64),
+		TokenType:   sanitize.Sanitize(tok.Type, 64),
+		Path:        sanitize.Sanitize(tok.DeployedPath, 512),
+		TriggeredAt: now.UTC(),
+		Detail:      "rate limit reached; further events suppressed until window expires",
+	}
+	_ = a.Send(ctx, payload)
+}
+
 // safeDispatch wraps dispatch with a per-event panic recovery.
 // A panic inside dispatch (e.g., nil pointer in an alert implementation,
 // unexpected HTTP response structure) is caught and logged to stderr.
@@ -419,12 +447,18 @@ func (w *linuxWatcher) dispatch(rateMap map[string]*rateEntry, tok DeployedToken
 	}
 	re := rateMap[tok.ID]
 	if re == nil || now.After(re.windowEnd) {
+		// New window: reset state.
 		rateMap[tok.ID] = &rateEntry{count: 1, windowEnd: now.Add(time.Hour)}
 	} else {
 		re.count++
 		if re.count > limit {
 			ev.Status = triglog.TriggerRateLimited
 			_ = triglog.Append(w.dataDir, ev)
+			// Send ONE suppression alert per token per window.
+			if !re.alertSent {
+				re.alertSent = true
+				w.sendSuppressionAlert(tok, now)
+			}
 			return
 		}
 	}
