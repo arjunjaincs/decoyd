@@ -170,6 +170,71 @@ func (w *windowsWatcher) status() WatcherStatus {
 	return WatcherStatus{Running: w.running, Watching: w.count}
 }
 
+// reload re-reads the token list and synchronises fsnotify directory watches.
+// On Windows, fsnotify watches directories rather than individual files, so
+// reload removes watches for directories that have no remaining decoys and
+// adds watches for directories of newly deployed tokens.
+func (w *windowsWatcher) reload() error {
+	w.mu.Lock()
+	running := w.running
+	watcher := w.watcher
+	st := w.st
+	dataDir := w.dataDir
+	w.mu.Unlock()
+	if !running || watcher == nil {
+		return nil
+	}
+
+	var tokens []DeployedToken
+	var err error
+	if st != nil {
+		ts, loadErr := st.ListTokens()
+		if loadErr != nil {
+			return fmt.Errorf("reload: list tokens: %w", loadErr)
+		}
+		for _, t := range ts {
+			if t.DeployedPath != "" {
+				tokens = append(tokens, DeployedToken{
+					ID: t.ID, Type: t.Type,
+					DeployedPath: t.DeployedPath, AlertChannelID: t.AlertChannelID,
+				})
+			}
+		}
+	} else {
+		tokens, err = ReadDeployedSnapshot(dataDir)
+		if err != nil {
+			return fmt.Errorf("reload: read snapshot: %w", err)
+		}
+	}
+
+	// Collect new set of directories to watch.
+	newDirs := make(map[string]struct{}, len(tokens))
+	for _, t := range tokens {
+		if t.DeployedPath != "" {
+			newDirs[filepath.Dir(t.DeployedPath)] = struct{}{}
+		}
+	}
+
+	// Add watches for new directories (Add is idempotent if already watched).
+	for dir := range newDirs {
+		if addErr := watcher.Add(dir); addErr != nil {
+			continue // directory may not exist yet — not fatal
+		}
+	}
+
+	// Remove watches for directories that no longer have any tokens.
+	for _, watched := range watcher.WatchList() {
+		if _, keep := newDirs[watched]; !keep {
+			_ = watcher.Remove(watched)
+		}
+	}
+
+	w.mu.Lock()
+	w.count = len(tokens)
+	w.mu.Unlock()
+	return nil
+}
+
 // ----------------------------------------------------------------------------
 // eventLoop
 // ----------------------------------------------------------------------------

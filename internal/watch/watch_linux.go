@@ -45,8 +45,13 @@ type linuxWatcher struct {
 	dataDir string
 	cfg     WatcherConfig
 
-	mu      sync.Mutex
-	wdMu    sync.RWMutex // protects wdMap against concurrent reads/writes
+	mu   sync.Mutex
+	wdMu sync.RWMutex // protects wdMap against concurrent reads/writes
+
+	// wdMap maps inotify watch descriptor → deployed token.
+	// Protected by wdMu for all concurrent accesses.
+	wdMap map[int32]DeployedToken
+
 	running bool
 	count   int    // number of files currently watched
 	release func() // releases the watcher.pid lock; nil when not running
@@ -130,7 +135,7 @@ func (w *linuxWatcher) start() error {
 	// path → DeployedToken (for alert dispatch)
 	const mask = unix.IN_OPEN | unix.IN_ACCESS | unix.IN_MODIFY |
 		unix.IN_MOVE_SELF | unix.IN_DELETE_SELF
-	wdMap := make(map[int32]DeployedToken) // wd → token
+	w.wdMap = make(map[int32]DeployedToken) // wd → token; protected by wdMu
 	for _, tok := range tokens {
 		if tok.DeployedPath == "" {
 			continue
@@ -140,12 +145,12 @@ func (w *linuxWatcher) start() error {
 			// File may not exist yet — skip silently, not fatal.
 			continue
 		}
-		wdMap[int32(wd)] = tok // #nosec G115 -- InotifyAddWatch returns int; Linux WDs are positive and bounded within int32 range
+		w.wdMap[int32(wd)] = tok // #nosec G115 -- InotifyAddWatch returns int; Linux WDs are positive and bounded within int32 range
 	}
 
-	w.count = len(wdMap)
+	w.count = len(w.wdMap)
 
-	go w.eventLoop(wdMap, mask)
+	go w.eventLoop(mask)
 	return nil
 }
 
@@ -208,7 +213,7 @@ func (w *linuxWatcher) status() WatcherStatus {
 // eventLoop
 // ----------------------------------------------------------------------------
 
-func (w *linuxWatcher) eventLoop(wdMap map[int32]DeployedToken, mask uint32) {
+func (w *linuxWatcher) eventLoop(mask uint32) {
 	defer close(w.done)
 
 	// Top-level panic recovery: logs fatal panics to stderr so the crash is
@@ -306,7 +311,7 @@ func (w *linuxWatcher) eventLoop(wdMap map[int32]DeployedToken, mask uint32) {
 			offset += unix.SizeofInotifyEvent + nameLen
 
 			w.wdMu.RLock()
-			tok, ok := wdMap[wd]
+			tok, ok := w.wdMap[wd]
 			w.wdMu.RUnlock()
 			if !ok {
 				continue
@@ -328,9 +333,9 @@ func (w *linuxWatcher) eventLoop(wdMap map[int32]DeployedToken, mask uint32) {
 			if evMask&(unix.IN_MOVE_SELF|unix.IN_DELETE_SELF) != 0 {
 				_, _ = unix.InotifyRmWatch(w.inoFD, uint32(wd)) // #nosec G115 -- wd is int32 from wdMap key; WDs we added are always positive so sign bit is 0
 				w.wdMu.Lock()
-				delete(wdMap, wd)
+				delete(w.wdMap, wd)
 				w.mu.Lock()
-				w.count = len(wdMap)
+				w.count = len(w.wdMap)
 				w.mu.Unlock()
 				w.wdMu.Unlock()
 				// Attempt to re-add the watch (e.g. after atomic file replace).
@@ -339,9 +344,9 @@ func (w *linuxWatcher) eventLoop(wdMap map[int32]DeployedToken, mask uint32) {
 					newWD, err := unix.InotifyAddWatch(w.inoFD, t.DeployedPath, mask)
 					if err == nil {
 						w.wdMu.Lock()
-						wdMap[int32(newWD)] = t // #nosec G115 -- InotifyAddWatch returns int; Linux WDs are positive and bounded within int32 range
+						w.wdMap[int32(newWD)] = t // #nosec G115 -- InotifyAddWatch returns int; Linux WDs are positive and bounded within int32 range
 						w.mu.Lock()
-						w.count = len(wdMap)
+						w.count = len(w.wdMap)
 						w.mu.Unlock()
 						w.wdMu.Unlock()
 					}
@@ -506,4 +511,74 @@ func newEventID() string {
 	b := make([]byte, 8)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+// ----------------------------------------------------------------------------
+// reload — re-read token list and sync inotify watches
+// ----------------------------------------------------------------------------
+
+// reload loads the current token list and diffs it against the active w.wdMap,
+// adding inotify watches for newly deployed tokens and removing watches for
+// tokens that no longer exist. Thread-safe; safe to call from any goroutine.
+// Returns nil if the watcher is not running.
+func (w *linuxWatcher) reload() error {
+	w.mu.Lock()
+	running := w.running
+	inoFD := w.inoFD
+	w.mu.Unlock()
+	if !running {
+		return nil
+	}
+
+	tokens, err := w.loadTokens()
+	if err != nil {
+		return fmt.Errorf("reload: load tokens: %w", err)
+	}
+
+	// Build a path→token map for the new list.
+	newByPath := make(map[string]DeployedToken, len(tokens))
+	for _, t := range tokens {
+		if t.DeployedPath != "" {
+			newByPath[t.DeployedPath] = t
+		}
+	}
+
+	const mask = unix.IN_OPEN | unix.IN_ACCESS | unix.IN_MODIFY |
+		unix.IN_MOVE_SELF | unix.IN_DELETE_SELF
+
+	w.wdMu.Lock()
+	defer w.wdMu.Unlock()
+
+	// Build reverse map: path → wd, for tokens we already watch.
+	watchedByPath := make(map[string]int32, len(w.wdMap))
+	for wd, tok := range w.wdMap {
+		watchedByPath[tok.DeployedPath] = wd
+	}
+
+	// Add watches for newly deployed tokens.
+	for path, tok := range newByPath {
+		if _, already := watchedByPath[path]; already {
+			continue // already watched
+		}
+		wd, addErr := unix.InotifyAddWatch(inoFD, path, mask)
+		if addErr != nil {
+			continue // file may not exist yet; not fatal
+		}
+		w.wdMap[int32(wd)] = tok // #nosec G115 -- InotifyAddWatch returns int; WDs are positive
+	}
+
+	// Remove watches for tokens no longer in the list.
+	for path, wd := range watchedByPath {
+		if _, stillExists := newByPath[path]; !stillExists {
+			_, _ = unix.InotifyRmWatch(inoFD, uint32(wd)) // #nosec G115 -- wd is int32
+			delete(w.wdMap, wd)
+		}
+	}
+
+	// Update count under mu.
+	w.mu.Lock()
+	w.count = len(w.wdMap)
+	w.mu.Unlock()
+
+	return nil
 }

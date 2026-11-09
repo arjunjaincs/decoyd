@@ -49,3 +49,9 @@ func (w *Watcher) Stop() { w.impl.stop() }
 
 // Status returns a snapshot of the current watcher state.
 func (w *Watcher) Status() WatcherStatus { return w.impl.status() }
+
+// Reload re-reads the token list and synchronises the set of watched files,
+// adding newly deployed tokens and removing purged ones. Idempotent and
+// thread-safe. The TUI calls it after deploy and after remove/purge.
+// Returns nil if the watcher is not running (no-op in that case).
+func (w *Watcher) Reload() error { return w.impl.reload() }

@@ -11,6 +11,9 @@ type watcherImpl interface {
 	start() error
 	stop()
 	status() WatcherStatus
+	// reload re-reads the token list and synchronises the set of watched files,
+	// adding new watches and removing stale ones. No-op if not running. Thread-safe.
+	reload() error
 }
 
 // newImpl constructs the platform-specific implementation.
