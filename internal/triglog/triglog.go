@@ -19,6 +19,8 @@ import (
 	"path/filepath"
 	"sort"
 	"time"
+
+	"github.com/arjunjaincs/decoyd/internal/filelock"
 )
 
 // ----------------------------------------------------------------------------
@@ -93,9 +95,7 @@ func logPath(dataDir string) string {
 // Append marshals te to JSON and appends it as a newline-terminated record to
 // dataDir/triggers.jsonl. The file is created with 0600 permissions if absent.
 // Append is the only mutation operation: records are never edited or deleted.
-//
-// Safe to call from multiple goroutines in the same process only if the caller
-// holds an external mutex; the underlying os.OpenFile call is not atomic.
+// It serializes concurrent callers through a file lock on triggers.jsonl.lock.
 func Append(dataDir string, te TriggerEvent) error {
 	if te.ID == "" {
 		return ErrEmptyID
@@ -107,6 +107,12 @@ func Append(dataDir string, te TriggerEvent) error {
 	}
 
 	path := logPath(dataDir)
+	lf, err := filelock.Lock(path)
+	if err != nil {
+		return fmt.Errorf("triglog lock: %w", err)
+	}
+	defer lf.Unlock()
+
 	// #nosec G304 -- path is always filepath.Join(dataDir, logFileName), never user input
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
@@ -201,7 +207,13 @@ func LoadByToken(dataDir, tokenID string) ([]TriggerEvent, error) {
 // Returns nil if the file did not exist.
 func ClearAll(dataDir string) error {
 	path := logPath(dataDir)
-	err := os.Remove(path)
+	lf, err := filelock.Lock(path)
+	if err != nil {
+		return fmt.Errorf("triglog lock: %w", err)
+	}
+	defer lf.Unlock()
+
+	err = os.Remove(path)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("triglog clear: %w", err)
 	}
@@ -239,6 +251,12 @@ func DeleteOne(dataDir, id string) error {
 
 	// Write a temp file, then rename.
 	path := logPath(dataDir)
+	lf, err := filelock.Lock(path)
+	if err != nil {
+		return fmt.Errorf("triglog lock: %w", err)
+	}
+	defer lf.Unlock()
+
 	tmp := path + ".tmp"
 	// #nosec G304
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
@@ -263,6 +281,12 @@ func DeleteOne(dataDir, id string) error {
 			_ = os.Remove(tmp)
 			return fmt.Errorf("triglog rewrite write: %w", werr)
 		}
+	}
+	// Fsync before rename to ensure data is durable on the target filesystem.
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("triglog rewrite sync: %w", err)
 	}
 	if err := f.Close(); err != nil {
 		_ = os.Remove(tmp)

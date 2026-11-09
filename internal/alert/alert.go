@@ -190,8 +190,9 @@ const configFileName = "alert_config.json"
 
 // Load reads and decodes alert_config.json from dataDir.
 // Returns an empty AlertConfig (not an error) when the file does not exist yet.
-// If any channel entry is missing an ID (legacy config), Load backfills IDs
-// and persists the updated file before returning.
+// If any channel entry is missing an ID (legacy config), Load returns the in-memory
+// config with IDs filled but does NOT write back to disk; the caller must call
+// Save if persistence is needed. ID backfill on write is handled exclusively by Save.
 func Load(dataDir string) (AlertConfig, error) {
 	path := filepath.Join(dataDir, configFileName)
 	data, err := os.ReadFile(path) // #nosec G304 -- path is always filepath.Join(dataDir, configFileName), never user input
@@ -206,8 +207,8 @@ func Load(dataDir string) (AlertConfig, error) {
 		return AlertConfig{}, fmt.Errorf("parse alert config: %w", err)
 	}
 	// Backfill IDs for any channel entry that predates the ID field.
-	// If any were missing, persist the healed config immediately.
-	needsSave := false
+	// Load is read-only: it does not write back to disk. The caller must
+	// call Save if it wants to persist the backfilled IDs.
 	for i := range cfg.Channels {
 		if cfg.Channels[i].ID == "" {
 			id, err := GenerateChannelID()
@@ -215,18 +216,11 @@ func Load(dataDir string) (AlertConfig, error) {
 				return AlertConfig{}, fmt.Errorf("backfill channel ID: %w", err)
 			}
 			cfg.Channels[i].ID = id
-			needsSave = true
 		}
 	}
 	// Also backfill DefaultID if it's missing but channels exist.
 	if cfg.DefaultID == "" && len(cfg.Channels) > 0 {
 		cfg.DefaultID = cfg.Channels[0].ID
-		needsSave = true
-	}
-	if needsSave {
-		// Best-effort: don't return an error if the backfill write fails
-		// (e.g. read-only filesystem), just return the in-memory config.
-		_ = Save(dataDir, cfg)
 	}
 	return cfg, nil
 }

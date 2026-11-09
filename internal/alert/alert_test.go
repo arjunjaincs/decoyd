@@ -797,13 +797,17 @@ func TestLoad_BackfillsLegacyConfigWithoutIDs(t *testing.T) {
 	if cfg.DefaultID == "" {
 		t.Error("Load() did not set DefaultID from backfill")
 	}
-	// Verify it was also persisted to disk.
+	// Load is read-only; caller must Save to persist backfilled IDs.
+	// Save then reload to verify round-trip consistency.
+	if err := Save(dir, cfg); err != nil {
+		t.Fatalf("Save() after backfill error: %v", err)
+	}
 	reloaded, err := Load(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if reloaded.Channels[0].ID != cfg.Channels[0].ID {
-		t.Error("backfill IDs not consistent between load calls")
+		t.Error("backfill IDs not consistent after Save+Load")
 	}
 }
 
