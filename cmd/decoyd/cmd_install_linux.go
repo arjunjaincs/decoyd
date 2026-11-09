@@ -22,6 +22,15 @@ Restart=on-failure
 RestartSec=5s
 # Keep the bbolt database accessible to the running user only.
 UMask=0077
+# Security hardening: directives that work without user namespaces.
+# ProtectSystem/PrivateTmp require user namespaces (disabled in many
+# WSL and container environments) and are intentionally omitted.
+NoNewPrivileges=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+MemoryDenyWriteExecute=yes
 
 [Install]
 WantedBy=default.target
@@ -62,7 +71,7 @@ func cmdInstall(dataDir string) error {
 	defer f.Close()
 
 	tmpl := template.Must(template.New("unit").Parse(systemdUnitTemplate))
-	if err := tmpl.Execute(f, struct{ ExecPath string }{ExecPath: execPath}); err != nil {
+	if err := tmpl.Execute(f, struct{ ExecPath string }{ExecPath: quoteExecStart(execPath)}); err != nil {
 		return fmt.Errorf("render unit: %w", err)
 	}
 	_ = f.Close()
