@@ -89,7 +89,7 @@ func TestGenerateAWSCredentials_Format(t *testing.T) {
 	}
 
 	// Access key ID must match AKIA[A-Z0-9]{16}
-	re := regexp.MustCompile(`aws_access_key_id = (AKIA[A-Z0-9]{16})`)
+	re := regexp.MustCompile(`aws_access_key_id = (AKIA[A-Z2-7]{16})`)
 	m := re.FindStringSubmatch(tok.Value)
 	if m == nil {
 		t.Errorf("aws_access_key_id not found or wrong format in:\n%s", tok.Value)
@@ -285,6 +285,74 @@ func TestGenerateDNSCanary_LabelUniqueness(t *testing.T) {
 			t.Fatalf("duplicate label %q at iteration %d", label, i)
 		}
 		seen[label] = struct{}{}
+	}
+}
+
+// ── Fingerprint denylist ─────────────────────────────────────────────────────
+
+// TestNoStaticIdentifiers generates 200 tokens of every type and fails if any
+// token value or filename matches the denylist of static identifiers.
+// Rule 12: NO static identifiers ("decoyd", "canary", "decoy" etc.) in generated files.
+// "fake" and "example" are matched as whole words only since random alphanumeric
+// strings may accidentally contain them as substrings.
+func TestNoStaticIdentifiers(t *testing.T) {
+	// exactPhrases must NOT appear anywhere (case-insensitive substring match).
+	exactPhrases := []string{
+		"decoy",
+		"canary",
+		"decoyd",
+		"# Create a DNS",
+		"# Label:",
+		"Decoyd will",
+		"dns_canary",
+	}
+
+	// wordPatterns must NOT appear as whole words (non-alphanum boundaries).
+	wordPatterns := []*regexp.Regexp{
+		regexp.MustCompile(`(?i)\bfake\b`),
+		regexp.MustCompile(`(?i)\bexample\b`),
+	}
+
+	allTypes := []string{
+		tokens.TypeAWSCredentials,
+		tokens.TypeSSHKey,
+		tokens.TypeEnvSecrets,
+		tokens.TypeGitHubPAT,
+		tokens.TypeSlackToken,
+		tokens.TypeKubeconfig,
+		tokens.TypeDBDump,
+		tokens.TypeDNSCanary,
+	}
+
+	const n = 200
+	for _, tt := range allTypes {
+		for i := 0; i < n; i++ {
+			tok, err := tokens.Generate(tt)
+			if err != nil {
+				t.Fatalf("Generate(%q) #%d error: %v", tt, i, err)
+			}
+			for _, phrase := range exactPhrases {
+				lo := strings.ToLower(phrase)
+				if strings.Contains(strings.ToLower(tok.Value), lo) {
+					t.Errorf("type=%s token[%d] Value contains banned phrase %q (excerpt: %.120q)",
+						tt, i, phrase, tok.Value)
+				}
+				if strings.Contains(strings.ToLower(tok.Filename), lo) {
+					t.Errorf("type=%s token[%d] Filename=%q contains banned phrase %q",
+						tt, i, tok.Filename, phrase)
+				}
+			}
+			for _, re := range wordPatterns {
+				if re.MatchString(tok.Value) {
+					t.Errorf("type=%s token[%d] Value matches banned word pattern %q (excerpt: %.120q)",
+						tt, i, re.String(), tok.Value)
+				}
+				if re.MatchString(tok.Filename) {
+					t.Errorf("type=%s token[%d] Filename=%q matches banned word pattern %q",
+						tt, i, tok.Filename, re.String())
+				}
+			}
+		}
 	}
 }
 

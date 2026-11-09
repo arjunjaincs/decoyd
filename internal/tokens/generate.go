@@ -19,6 +19,7 @@ import (
 const (
 	alphaNum      = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 	upperAlphaNum = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	base32Upper   = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
 	lowerAlpha    = "abcdefghijklmnopqrstuvwxyz"
 	digits        = "0123456789"
 	bcryptChars   = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789./"
@@ -63,7 +64,7 @@ func GenerateAWSCredentials() (Token, error) {
 		return Token{}, err
 	}
 
-	keyBody, err := randStr(16, upperAlphaNum)
+	keyBody, err := randStr(16, base32Upper)
 	if err != nil {
 		return Token{}, fmt.Errorf("aws key: %w", err)
 	}
@@ -284,6 +285,18 @@ func GenerateKubeconfig() (Token, error) {
 	if err != nil {
 		return Token{}, err
 	}
+	clusterName, err := randStr(8, lowerAlpha)
+	if err != nil {
+		return Token{}, err
+	}
+	userName, err := randStr(8, lowerAlpha)
+	if err != nil {
+		return Token{}, err
+	}
+	contextName, err := randStr(8, lowerAlpha)
+	if err != nil {
+		return Token{}, err
+	}
 
 	value := fmt.Sprintf(`apiVersion: v1
 kind: Config
@@ -291,19 +304,19 @@ clusters:
 - cluster:
     server: https://k8s-%s.internal:6443
     certificate-authority-data: %s
-  name: decoy-cluster
+  name: %s
 contexts:
 - context:
-    cluster: decoy-cluster
-    user: decoy-admin
-  name: decoy-context
-current-context: decoy-context
+    cluster: %s
+    user: %s
+  name: %s
+current-context: %s
 preferences: {}
 users:
-- name: decoy-admin
+- name: %s
   user:
     token: %s
-`, clusterSuffix, caData, bearerToken)
+`, clusterSuffix, caData, clusterName, clusterName, userName, contextName, contextName, userName, bearerToken)
 
 	return Token{
 		ID:        id,
@@ -433,22 +446,15 @@ func GenerateDNSCanary() (Token, error) {
 		return Token{}, fmt.Errorf("dns label: %w", err)
 	}
 
-	value := fmt.Sprintf(`# DNS Canary Token
-# Label: %s
-#
-# Create a DNS record for this label on a domain you control:
-#   %s.<your-domain>  IN  A  <any-IP>   (or CNAME to a sink)
-#
-# Decoyd will alert when a DNS query for this hostname is detected
-# (requires DNS provider log access — configured in Phase 4).
-label=%s
-`, label, label, label)
+	// Value holds only the bare label — no instruction text.
+	// Instructions are shown in the TUI at generation time (not stored in the file).
+	value := "label=" + label + "\n"
 
 	return Token{
 		ID:        id,
 		Type:      TypeDNSCanary,
 		Value:     value,
-		Filename:  "dns_canary.txt",
+		Filename:  "token.txt",
 		CreatedAt: now(),
 	}, nil
 }
