@@ -44,6 +44,8 @@ func run(args []string) error {
 			return cmdUninstall(dataDir)
 		case "triggers":
 			return cmdTriggers(dataDir)
+		case "doctor":
+			return cmdDoctor(dataDir, args[1:])
 		case "help", "--help", "-h":
 			printUsage()
 			return nil
@@ -236,6 +238,7 @@ Commands:
                      Task Scheduler on Windows)
   uninstall          Remove the installed system service
   triggers           Print recent trigger events
+  doctor [--json]    Run health checks (platform, data dir, DB lock, alert config)
   help               Show this help
 
 Data directory:
