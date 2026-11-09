@@ -44,6 +44,8 @@ func run(args []string) error {
 			return cmdUninstall(dataDir)
 		case "triggers":
 			return cmdTriggers(dataDir)
+		case "test":
+			return cmdSelfTest(dataDir)
 		case "doctor":
 			return cmdDoctor(dataDir, args[1:])
 		case "help", "--help", "-h":
@@ -238,6 +240,7 @@ Commands:
                      Task Scheduler on Windows)
   uninstall          Remove the installed system service
   triggers           Print recent trigger events
+  test               Self-test: deploy temp decoy, start watcher, assert alert arrives
   doctor [--json]    Run health checks (platform, data dir, DB lock, alert config)
   help               Show this help
 
