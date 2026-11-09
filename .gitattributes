@@ -1,0 +1,10 @@
+# Enforce LF line endings for all text files checked into this repository.
+# Windows editors normalise to CRLF on checkout; .gitattributes overrides that.
+* text=auto eol=lf
+
+# Binary files — never normalise.
+*.png binary
+*.jpg binary
+*.ico binary
+*.gz  binary
+*.zip binary
