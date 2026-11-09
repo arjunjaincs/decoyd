@@ -40,6 +40,8 @@ func run(args []string) error {
 			return cmdWatch(dataDir)
 		case "install":
 			return cmdInstall(dataDir)
+		case "uninstall":
+			return cmdUninstall(dataDir)
 		case "triggers":
 			return cmdTriggers(dataDir)
 		case "help", "--help", "-h":
@@ -232,6 +234,7 @@ Commands:
   watch              Run the headless file watcher (alert on token access)
   install            Install decoyd watch as a system service (systemd on Linux,
                      Task Scheduler on Windows)
+  uninstall          Remove the installed system service
   triggers           Print recent trigger events
   help               Show this help
 
