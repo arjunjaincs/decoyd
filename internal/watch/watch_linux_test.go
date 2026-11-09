@@ -152,3 +152,71 @@ func TestLinuxWatcher_Debounce(t *testing.T) {
 		t.Errorf("debounce not working: got %d events, expected much fewer", count)
 	}
 }
+
+// TestWdMapRaceReAdd exercises the concurrent wdMap path where the re-add
+// goroutine (spawned by eventLoop on IN_MOVE_SELF/IN_DELETE_SELF) writes to
+// wdMap while eventLoop reads it. Without the wdMu fix, go test -race will
+// report a data race on wdMap.
+//
+// Because gcc is not installed in this environment, -race cannot be run.
+// The test still validates the functional correctness of the re-add path.
+// UNKNOWN: data-race flag (requires gcc + go test -race).
+func TestWdMapRaceReAdd(t *testing.T) {
+	dir := t.TempDir()
+	decoyPath := filepath.Join(dir, "racefile")
+	if err := os.WriteFile(decoyPath, []byte("content"), 0o600); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	snap := []DeployedToken{
+		{ID: "racetestid00000", Type: "aws_credentials", DeployedPath: decoyPath},
+	}
+	if err := WriteDeployedSnapshot(dir, snap); err != nil {
+		t.Fatalf("WriteDeployedSnapshot: %v", err)
+	}
+	w, err := newPlatformImpl(nil, dir)
+	if err != nil {
+		t.Fatalf("newPlatformImpl: %v", err)
+	}
+	lw := w.(*linuxWatcher)
+	lw.cfg = WatcherConfig{DebounceDuration: 20 * time.Millisecond, RateLimit: 1000}
+	if err := lw.start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(func() { lw.stop() })
+
+	// Goroutine 1: repeatedly rename the decoy in and out (triggers IN_MOVE_SELF
+	// and IN_DELETE_SELF, causing the re-add goroutine to write to wdMap).
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 20; i++ {
+			tmpPath := decoyPath + ".tmp"
+			_ = os.Rename(decoyPath, tmpPath)
+			time.Sleep(5 * time.Millisecond)
+			_ = os.Rename(tmpPath, decoyPath)
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+
+	// Goroutine 2: repeatedly open the file (triggers IN_OPEN — concurrent read
+	// of wdMap in eventLoop).
+	go func() {
+		for i := 0; i < 50; i++ {
+			f, err := os.Open(decoyPath)
+			if err == nil {
+				_ = f.Close()
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+	}()
+
+	<-done
+	time.Sleep(500 * time.Millisecond)
+
+	// Watcher must still be running after concurrent renames.
+	st := lw.status()
+	if !st.Running {
+		t.Error("watcher stopped unexpectedly during race test")
+	}
+	t.Logf("TestWdMapRaceReAdd: no panic; race detection requires gcc (-race flag) — UNKNOWN")
+}

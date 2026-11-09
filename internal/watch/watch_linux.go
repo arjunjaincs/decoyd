@@ -46,6 +46,7 @@ type linuxWatcher struct {
 	cfg     WatcherConfig
 
 	mu      sync.Mutex
+	wdMu    sync.RWMutex // protects wdMap against concurrent reads/writes
 	running bool
 	count   int    // number of files currently watched
 	release func() // releases the watcher.pid lock; nil when not running
@@ -304,7 +305,9 @@ func (w *linuxWatcher) eventLoop(wdMap map[int32]DeployedToken, mask uint32) {
 			nameLen := int(raw.Len)
 			offset += unix.SizeofInotifyEvent + nameLen
 
+			w.wdMu.RLock()
 			tok, ok := wdMap[wd]
+			w.wdMu.RUnlock()
 			if !ok {
 				continue
 			}
@@ -324,19 +327,23 @@ func (w *linuxWatcher) eventLoop(wdMap map[int32]DeployedToken, mask uint32) {
 			// If file was moved/deleted, remove its watch and re-add after a delay.
 			if evMask&(unix.IN_MOVE_SELF|unix.IN_DELETE_SELF) != 0 {
 				_, _ = unix.InotifyRmWatch(w.inoFD, uint32(wd)) // #nosec G115 -- wd is int32 from wdMap key; WDs we added are always positive so sign bit is 0
+				w.wdMu.Lock()
 				delete(wdMap, wd)
 				w.mu.Lock()
 				w.count = len(wdMap)
 				w.mu.Unlock()
+				w.wdMu.Unlock()
 				// Attempt to re-add the watch (e.g. after atomic file replace).
 				go func(t DeployedToken) {
 					time.Sleep(100 * time.Millisecond)
 					newWD, err := unix.InotifyAddWatch(w.inoFD, t.DeployedPath, mask)
 					if err == nil {
-						w.mu.Lock()
+						w.wdMu.Lock()
 						wdMap[int32(newWD)] = t // #nosec G115 -- InotifyAddWatch returns int; Linux WDs are positive and bounded within int32 range
+						w.mu.Lock()
 						w.count = len(wdMap)
 						w.mu.Unlock()
+						w.wdMu.Unlock()
 					}
 				}(tok)
 			}
