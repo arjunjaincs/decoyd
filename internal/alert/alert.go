@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -356,6 +357,38 @@ func dots(n int) string {
 // alertTimeout is the per-request deadline applied by every Alerter.
 const alertTimeout = 10 * time.Second
 
+// alertResponseBodyLimit is the maximum number of bytes read from an alert
+// webhook response body. Responses beyond this limit are silently truncated.
+const alertResponseBodyLimit = 64 * 1024
+
+// ErrWebhookRedirected is returned when an alert webhook URL returns a redirect.
+// Webhook URLs must not redirect; update the URL to point directly to the endpoint.
+var ErrWebhookRedirected = errors.New("webhook URL redirected")
+
+// alertHTTPClient is the shared HTTP client used by all alerters.
+// It enforces connection, TLS, and response-header timeouts, and refuses
+// to follow redirects (webhook URLs must not redirect).
+var alertHTTPClient = &http.Client{
+	Transport: &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout: 5 * time.Second,
+		}).DialContext,
+		TLSHandshakeTimeout:   5 * time.Second,
+		ResponseHeaderTimeout: 10 * time.Second,
+	},
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		// Extract the host from the redirect target to include in the error,
+		// but never the full URL (may contain secrets in the path).
+		redirectHost := ""
+		if req.URL != nil {
+			redirectHost = req.URL.Host
+		}
+		// Return a typed error so callers can detect it; sanitizeErr will
+		// strip the URL from the *url.Error wrapper net/http adds.
+		return fmt.Errorf("%w to %s, update the URL", ErrWebhookRedirected, redirectHost)
+	},
+}
+
 // doPost marshals body to JSON, POSTs it to rawURL with Content-Type
 // application/json, and returns a sanitized error on failure.
 func doPost(ctx context.Context, rawURL string, body any) error {
@@ -372,12 +405,17 @@ func doPost(ctx context.Context, rawURL string, body any) error {
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := alertHTTPClient.Do(req)
 	if err != nil {
+		// Unwrap ErrWebhookRedirected from net/http's *url.Error wrapping.
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) && errors.Is(urlErr.Err, ErrWebhookRedirected) {
+			return urlErr.Err
+		}
 		return sanitizeErr(err)
 	}
 	defer func() {
-		_, _ = io.Copy(io.Discard, resp.Body)
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, alertResponseBodyLimit))
 		resp.Body.Close()
 	}()
 
@@ -401,12 +439,16 @@ func doPostText(ctx context.Context, rawURL, body string, headers map[string]str
 		req.Header.Set(k, v)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := alertHTTPClient.Do(req)
 	if err != nil {
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) && errors.Is(urlErr.Err, ErrWebhookRedirected) {
+			return urlErr.Err
+		}
 		return sanitizeErr(err)
 	}
 	defer func() {
-		_, _ = io.Copy(io.Discard, resp.Body)
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, alertResponseBodyLimit))
 		resp.Body.Close()
 	}()
 

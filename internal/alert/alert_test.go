@@ -844,3 +844,87 @@ func TestMultiChannel_RoundTrip(t *testing.T) {
 		t.Errorf("DefaultID %q does not match any channel ID", loaded.DefaultID)
 	}
 }
+
+// ----------------------------------------------------------------------------
+// HTTP client hardening (A8)
+// ----------------------------------------------------------------------------
+
+// redirectServer starts an httptest server that always returns a 302 redirect.
+func redirectServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://example.internal/redirected", http.StatusFound)
+	}))
+}
+
+// hugeBodyServer returns a 200 OK with a body larger than alertResponseBodyLimit.
+func hugeBodyServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	big := make([]byte, alertResponseBodyLimit+1024)
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(big)
+	}))
+}
+
+// responseHeaderSlowServer sleeps before writing response headers.
+// The sleep duration (2s) is long enough that a 50ms client timeout fires first,
+// but short enough that httptest.Server.Close() drains the in-flight request
+// within the 5-second watchdog.
+func responseHeaderSlowServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(2 * time.Second)
+		w.WriteHeader(http.StatusOK)
+	}))
+}
+
+func TestDoPost_RedirectRefused(t *testing.T) {
+	ts := redirectServer(t)
+	defer ts.Close()
+
+	err := (&WebhookAlerter{webhookURL: ts.URL}).Send(context.Background(), testPayload())
+	if err == nil {
+		t.Fatal("expected error when webhook redirects, got nil")
+	}
+	if !errors.Is(err, ErrWebhookRedirected) {
+		t.Errorf("expected ErrWebhookRedirected; got: %v", err)
+	}
+	if strings.Contains(err.Error(), "example.internal/redirected") {
+		t.Errorf("error leaks redirect path: %v", err)
+	}
+}
+
+func TestDoPost_HugeBodyTruncated(t *testing.T) {
+	ts := hugeBodyServer(t)
+	defer ts.Close()
+
+	err := (&WebhookAlerter{webhookURL: ts.URL}).Send(context.Background(), testPayload())
+	if err != nil {
+		t.Fatalf("expected success for huge-body 200 response; got: %v", err)
+	}
+}
+
+func TestDoPost_SlowResponseHeader(t *testing.T) {
+	// Use a short-timeout client so the test runs quickly.
+	shortClient := &http.Client{
+		Transport: &http.Transport{
+			ResponseHeaderTimeout: 50 * time.Millisecond,
+		},
+		CheckRedirect: alertHTTPClient.CheckRedirect,
+	}
+	orig := alertHTTPClient
+	alertHTTPClient = shortClient
+	defer func() { alertHTTPClient = orig }()
+
+	ts := responseHeaderSlowServer(t)
+	defer ts.Close()
+
+	err := (&WebhookAlerter{webhookURL: ts.URL}).Send(context.Background(), testPayload())
+	if err == nil {
+		t.Fatal("expected timeout error for slow response headers, got nil")
+	}
+	if strings.Contains(err.Error(), ts.URL) {
+		t.Errorf("error leaks URL: %v", err)
+	}
+}
