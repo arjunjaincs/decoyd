@@ -6,7 +6,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -124,16 +123,4 @@ func cmdSelfTest(dataDir string) error {
 
 	fmt.Printf("decoyd self-test: PASSED (%d alert(s) received)\n", atomic.LoadInt64(&alertReceived))
 	return nil
-}
-
-// selfTestPayloadDump is a helper for JSON decoding in the httptest handler
-// (unused in production path; kept for test assertions in cmd_selftest_test.go).
-type selfTestPayloadDump struct {
-	TokenID string `json:"token_id"`
-}
-
-// unmarshalPayload decodes a webhook POST body into selfTestPayloadDump.
-func unmarshalPayload(body []byte) (selfTestPayloadDump, error) {
-	var d selfTestPayloadDump
-	return d, json.Unmarshal(body, &d)
 }
