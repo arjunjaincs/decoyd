@@ -334,3 +334,104 @@ func TestDeployToFile_EmptyDir_Error(t *testing.T) {
 		t.Error("DeployToFile with empty targetDir should return error")
 	}
 }
+
+// ── A6: deploy hardening tests ───────────────────────────────────────────────
+
+// TestDeploy_SecretDirPerm verifies that secret token types create directories
+// with 0o700 (not 0o750 or wider).
+func TestDeploy_SecretDirPerm(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory permission bits not enforced on Windows")
+	}
+	secretTypes := []string{
+		tokens.TypeAWSCredentials,
+		tokens.TypeSSHKey,
+		tokens.TypeGitHubPAT,
+		tokens.TypeSlackToken,
+		tokens.TypeEnvSecrets,
+	}
+	for _, tt := range secretTypes {
+		tt := tt
+		t.Run(tt, func(t *testing.T) {
+			base := t.TempDir()
+			subDir := filepath.Join(base, "secret")
+			var tok tokens.Token
+			if tt == tokens.TypeSSHKey {
+				tok = tokens.Token{
+					ID:       "deadbeefdeadbeef",
+					Type:     tt,
+					Value:    "-----BEGIN OPENSSH PRIVATE KEY-----\ntest\n-----END OPENSSH PRIVATE KEY-----\n---PUBLIC KEY---\nssh-ed25519 AAAAC test\n",
+					Filename: "id_ed25519",
+				}
+			} else {
+				tok = makeTestToken(tt)
+			}
+			_, err := deploy.DeployToFile(tok, subDir, deploy.Options{})
+			if err != nil {
+				t.Fatalf("DeployToFile(%s): %v", tt, err)
+			}
+			fi, err := os.Stat(subDir)
+			if err != nil {
+				t.Fatalf("stat dir: %v", err)
+			}
+			got := fi.Mode().Perm()
+			if got != 0o700 {
+				t.Errorf("dir perm for %s = %04o; want 0700", tt, got)
+			}
+		})
+	}
+}
+
+// TestDeploy_FilePerm verifies that the deployed file has the expected mode.
+func TestDeploy_FilePerm(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file permission bits not enforced on Windows")
+	}
+	dir := t.TempDir()
+	tok := makeTestToken(tokens.TypeAWSCredentials)
+	res, err := deploy.DeployToFile(tok, dir, deploy.Options{})
+	if err != nil {
+		t.Fatalf("DeployToFile: %v", err)
+	}
+	fi, err := os.Stat(res.DeployedTo)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	got := fi.Mode().Perm()
+	if got != 0o600 {
+		t.Errorf("file perm = %04o; want 0600", got)
+	}
+}
+
+// TestDeploy_SymlinkRefusal verifies that placing a symlink at the target path
+// causes deploy to fail (O_NOFOLLOW on Linux) rather than following the link.
+func TestDeploy_SymlinkRefusal(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires elevated privileges on Windows")
+	}
+	dir := t.TempDir()
+	tok := makeTestToken(tokens.TypeAWSCredentials)
+
+	// Pre-place a symlink at the destination path.
+	dest := filepath.Join(dir, tok.Filename)
+	target := filepath.Join(dir, "real_file")
+	if err := os.WriteFile(target, []byte("real"), 0o600); err != nil {
+		t.Fatalf("write real_file: %v", err)
+	}
+	if err := os.Symlink(target, dest); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	_, err := deploy.DeployToFile(tok, dir, deploy.Options{})
+	if err == nil {
+		t.Error("DeployToFile succeeded when symlink at dest; want error (symlink refused)")
+	} else {
+		t.Logf("correctly refused symlink: %v", err)
+	}
+
+	// Verify real_file was NOT overwritten.
+	data, _ := os.ReadFile(target)
+	if string(data) != "real" {
+		t.Error("real_file was overwritten via symlink — O_NOFOLLOW not effective")
+	}
+}

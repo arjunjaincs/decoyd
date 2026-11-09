@@ -9,9 +9,9 @@ package deploy
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 
 	"github.com/arjunjaincs/decoyd/internal/tokens"
@@ -37,6 +37,24 @@ func PermForType(tokenType string) os.FileMode {
 		return 0o600
 	default:
 		return 0o644
+	}
+}
+
+// dirPermForType returns the directory permission for a token type.
+// Secret token types (keys, credentials) get 0o700 to restrict directory
+// listing to the owner. All other types get 0o750.
+func dirPermForType(tokenType string) os.FileMode {
+	switch tokenType {
+	case tokens.TypeAWSCredentials,
+		tokens.TypeSSHKey,
+		tokens.TypeGitHubPAT,
+		tokens.TypeSlackToken,
+		tokens.TypeEnvSecrets,
+		tokens.TypeDBDump,
+		tokens.TypeKubeconfig:
+		return 0o700
+	default:
+		return 0o750
 	}
 }
 
@@ -100,7 +118,7 @@ func DeployToFile(t tokens.Token, targetDir string, opts Options) (DeployResult,
 	}
 
 	// Ensure the directory exists.
-	if err := os.MkdirAll(absDir, 0o750); err != nil {
+	if err := os.MkdirAll(absDir, dirPermForType(t.Type)); err != nil {
 		return DeployResult{}, fmt.Errorf("deploy: create directory: %w", err)
 	}
 
@@ -151,7 +169,7 @@ func deploySSHKeyPair(t tokens.Token, targetDir string, opts Options) (DeployRes
 		return res, nil
 	}
 
-	if err := os.MkdirAll(absDir, 0o750); err != nil {
+	if err := os.MkdirAll(absDir, dirPermForType(t.Type)); err != nil {
 		return DeployResult{}, fmt.Errorf("deploy: create directory: %w", err)
 	}
 
@@ -170,12 +188,27 @@ func deploySSHKeyPair(t tokens.Token, targetDir string, opts Options) (DeployRes
 }
 
 // writeFile writes content to dest with the given permissions.
+// Uses openExclNoFollow (O_CREAT|O_EXCL|O_NOFOLLOW on Linux) to prevent
+// symlink attacks and TOCTOU races. Applies permissions via file descriptor
+// (Chmod on the fd) rather than a separate path-based chmod call.
 func writeFile(dest, content string, perm os.FileMode) error {
-	if err := os.WriteFile(dest, []byte(content), perm); err != nil {
+	f, err := openExclNoFollow(dest, perm)
+	if err != nil {
+		return fmt.Errorf("deploy: open %s: %w", dest, err)
+	}
+	defer f.Close()
+
+	if _, err := io.WriteString(f, content); err != nil {
+		// Best-effort: remove the partially-written file to avoid a corrupt decoy.
+		_ = os.Remove(dest)
 		return fmt.Errorf("deploy: write %s: %w", dest, err)
 	}
-	if runtime.GOOS != "windows" {
-		_ = os.Chmod(dest, perm)
+
+	// Apply permissions via fd (avoids a path-based chmod that could race).
+	if err := f.Chmod(perm); err != nil {
+		// Non-fatal on platforms where Chmod via fd is unsupported;
+		// the perm passed to openExclNoFollow already set the umask-adjusted mode.
+		_ = err
 	}
 	return nil
 }
