@@ -8,6 +8,35 @@ No cloud account. No ongoing cost. One static binary.
 
 ---
 
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `decoyd` | Launch the interactive TUI |
+| `decoyd watch` | Headless file watcher (for use with systemd/Task Scheduler) |
+| `decoyd install` | Install `decoyd watch` as a system service |
+| `decoyd uninstall` | Remove the installed system service |
+| `decoyd test` | Self-test: deploy temp decoy, start watcher, assert alert arrives |
+| `decoyd doctor [--json]` | Health check: data dir, DB lock, snapshot, alert config, detection tier |
+| `decoyd list` | Print all token records |
+| `decoyd triggers` | Print recent trigger events |
+| `decoyd remove [--purge] <id>` | Delete a token record (optionally its file) |
+
+---
+
+## Security & threat model
+
+See [SECURITY.md](SECURITY.md) for the vulnerability reporting policy and
+[docs/THREAT-MODEL.md](docs/THREAT-MODEL.md) for the full threat model.
+
+Generated token files contain **no static identifiers** (the value is what matters;
+searching a leaked credential means looking up its value, not a label).
+
+DNS canary token label format: `<16 random base32 chars>` — instructions for
+configuring your DNS resolver are shown in the TUI at generation time.
+
+---
+
 ## Token types
 
 | Type | What it produces |
