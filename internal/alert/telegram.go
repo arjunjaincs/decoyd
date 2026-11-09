@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"github.com/arjunjaincs/decoyd/internal/sanitize"
 )
 
 // TelegramAlerter sends a plain-text message via the Telegram Bot API.
@@ -50,13 +52,15 @@ func (a *TelegramAlerter) Send(ctx context.Context, p AlertPayload) error {
 		detail = "(none)"
 	}
 
+	// Sanitize user-controlled fields. No parse_mode is set so Telegram renders
+	// the message as plain text.
 	text := fmt.Sprintf(
 		"[DECOYD ALERT]\nToken: %s (%s)\nPath:  %s\nTime:  %s\nDetail: %s",
-		p.TokenType,
-		p.TokenID,
-		p.Path,
+		sanitize.Sanitize(p.TokenType, 64),
+		sanitize.Sanitize(p.TokenID, 64),
+		sanitize.Sanitize(p.Path, 512),
 		p.TriggeredAt.UTC().Format(time.RFC3339),
-		detail,
+		sanitize.Sanitize(detail, 512),
 	)
 
 	// apiURL contains the bot token in its path — sanitizeErr (called inside

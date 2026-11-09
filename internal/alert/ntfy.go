@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"github.com/arjunjaincs/decoyd/internal/sanitize"
 )
 
 // NtfyAlerter sends a push notification via ntfy (ntfy.sh or self-hosted).
@@ -28,13 +30,14 @@ func (a *NtfyAlerter) Send(ctx context.Context, p AlertPayload) error {
 	// ntfy expects the full URL: serverURL + "/" + topic
 	targetURL := fmt.Sprintf("%s/%s", a.serverURL, a.topic)
 
+	// Sanitize user-controlled fields; ntfy displays as plain text.
 	body := fmt.Sprintf(
 		"Token: %s (%s)\nPath: %s\nTime: %s\nDetail: %s",
-		p.TokenType,
-		p.TokenID,
-		p.Path,
+		sanitize.Sanitize(p.TokenType, 64),
+		sanitize.Sanitize(p.TokenID, 64),
+		sanitize.Sanitize(p.Path, 512),
 		p.TriggeredAt.UTC().Format(time.RFC3339),
-		detail,
+		sanitize.Sanitize(detail, 512),
 	)
 
 	headers := map[string]string{

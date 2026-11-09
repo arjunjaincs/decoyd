@@ -32,6 +32,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/arjunjaincs/decoyd/internal/alert"
+	"github.com/arjunjaincs/decoyd/internal/sanitize"
 	"github.com/arjunjaincs/decoyd/internal/store"
 	"github.com/arjunjaincs/decoyd/internal/triglog"
 )
@@ -459,12 +460,13 @@ func (w *linuxWatcher) dispatch(rateMap map[string]*rateEntry, tok DeployedToken
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 	defer cancel()
 
+	// Sanitize all external strings before building AlertPayload (Rule 13).
 	payload := alert.AlertPayload{
-		TokenID:     tok.ID,
-		TokenType:   tok.Type,
-		Path:        tok.DeployedPath,
+		TokenID:     sanitize.Sanitize(tok.ID, 64),
+		TokenType:   sanitize.Sanitize(tok.Type, 64),
+		Path:        sanitize.Sanitize(tok.DeployedPath, 512),
 		TriggeredAt: now.UTC(),
-		Detail:      "file " + evType,
+		Detail:      sanitize.Sanitize("file "+evType, 128),
 	}
 	if sendErr := a.Send(ctx, payload); sendErr != nil {
 		ev.Status = triglog.TriggerFailed

@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"github.com/arjunjaincs/decoyd/internal/sanitize"
 )
 
 // SlackAlerter sends a Block Kit message to a Slack incoming webhook.
@@ -36,6 +38,9 @@ func (a *SlackAlerter) Send(ctx context.Context, p AlertPayload) error {
 		detail = "(none)"
 	}
 
+	// Use plain_text for all user-data fields: Slack does not expand mentions
+	// or apply markdown in plain_text objects.
+	// Ref: https://api.slack.com/reference/block-kit/composition-objects#text
 	body := slackPayload{
 		Blocks: []slackBlock{
 			{
@@ -45,15 +50,15 @@ func (a *SlackAlerter) Send(ctx context.Context, p AlertPayload) error {
 			{
 				Type: "section",
 				Fields: []slackText{
-					{Type: "mrkdwn", Text: fmt.Sprintf("*Token ID*\n%s", p.TokenID)},
-					{Type: "mrkdwn", Text: fmt.Sprintf("*Type*\n%s", p.TokenType)},
-					{Type: "mrkdwn", Text: fmt.Sprintf("*Path*\n%s", p.Path)},
-					{Type: "mrkdwn", Text: fmt.Sprintf("*Time*\n%s", p.TriggeredAt.UTC().Format(time.RFC3339))},
+					{Type: "plain_text", Text: fmt.Sprintf("Token ID: %s", sanitize.Sanitize(p.TokenID, 64))},
+					{Type: "plain_text", Text: fmt.Sprintf("Type: %s", sanitize.Sanitize(p.TokenType, 64))},
+					{Type: "plain_text", Text: fmt.Sprintf("Path: %s", sanitize.Sanitize(p.Path, 512))},
+					{Type: "plain_text", Text: fmt.Sprintf("Time: %s", p.TriggeredAt.UTC().Format(time.RFC3339))},
 				},
 			},
 			{
 				Type: "section",
-				Text: &slackText{Type: "mrkdwn", Text: fmt.Sprintf("*Detail*\n%s", detail)},
+				Text: &slackText{Type: "plain_text", Text: fmt.Sprintf("Detail: %s", sanitize.Sanitize(detail, 512))},
 			},
 		},
 	}
