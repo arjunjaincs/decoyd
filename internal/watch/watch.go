@@ -1,4 +1,4 @@
-﻿// Package watch will contain the file watcher and detection engine (Phase 4).
+// Package watch will contain the file watcher and detection engine (Phase 4).
 // This file exposes the Watcher API surface used by cmd/decoyd/cmd_watch.go.
 // The full platform-specific implementations (inotify on Linux, fsnotify on
 // Windows) are built in Phase 4 and live in separate build-tagged files.

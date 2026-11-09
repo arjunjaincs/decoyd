@@ -1,4 +1,4 @@
-﻿// deployed.go — snapshot of tokens that have been deployed to disk.
+// deployed.go — snapshot of tokens that have been deployed to disk.
 //
 // deployed_tokens.json is the cross-process coordination file between the TUI
 // and the headless watcher.  The TUI writes it on every deploy/delete/startup;

@@ -1,4 +1,4 @@
-﻿// watch_impl.go — internal interface satisfied by each platform implementation.
+// watch_impl.go — internal interface satisfied by each platform implementation.
 package watch
 
 import (

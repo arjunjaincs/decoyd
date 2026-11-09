@@ -1,4 +1,4 @@
-﻿package triglog_test
+package triglog_test
 
 import (
 	"os"

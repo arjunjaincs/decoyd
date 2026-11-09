@@ -36,6 +36,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Check for UTF-8 BOM in Go source files
+        # Fails if any .go file starts with the UTF-8 byte-order mark (EF BB BF).
+        # BOMs in Go source files are invalid; the Go toolchain rejects them during
+        # coverage instrumentation even when normal compilation succeeds.
+        # This step runs only on Linux runners (grep -rP uses PCRE).
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          bad=$(grep -rlP '^\xef\xbb\xbf' --include='*.go' . || true)
+          if [ -n "$bad" ]; then
+            echo "ERROR: the following .go files start with a UTF-8 BOM:"
+            echo "$bad"
+            exit 1
+          fi
+          echo "OK: no .go files start with a UTF-8 BOM"
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
@@ -93,6 +109,22 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Check for UTF-8 BOM in Go source files
+        # Fails if any .go file starts with the UTF-8 byte-order mark (EF BB BF).
+        # BOMs in Go source files are invalid; the Go toolchain rejects them during
+        # coverage instrumentation even when normal compilation succeeds.
+        # This step runs only on Linux runners (grep -rP uses PCRE).
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          bad=$(grep -rlP '^\xef\xbb\xbf' --include='*.go' . || true)
+          if [ -n "$bad" ]; then
+            echo "ERROR: the following .go files start with a UTF-8 BOM:"
+            echo "$bad"
+            exit 1
+          fi
+          echo "OK: no .go files start with a UTF-8 BOM"
 
       - name: Set up Go
         uses: actions/setup-go@v5
