@@ -257,7 +257,7 @@ func TestSinkSanitize_AllSinksTableDriven(t *testing.T) {
 			},
 		},
 		{
-			name:   "Telegram",
+			name: "Telegram",
 			mkSink: func(url string) Alerter {
 				return newTelegramAlerter("test-bot-token", "123", url)
 			},

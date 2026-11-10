@@ -7,12 +7,12 @@ import (
 	"bytes"
 	"context"
 
-	"github.com/arjunjaincs/decoyd/internal/sanitize"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/arjunjaincs/decoyd/internal/sanitize"
 	"io"
 	"net"
 	"net/http"

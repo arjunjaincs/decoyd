@@ -72,8 +72,6 @@ func randStr(n int, charset string) (string, error) {
 	return string(b), nil
 }
 
-
-
 // randB64 returns n random bytes encoded as standard base64.
 func randB64(n int) (string, error) {
 	b := make([]byte, n)
@@ -82,7 +80,6 @@ func randB64(n int) (string, error) {
 	}
 	return base64.StdEncoding.EncodeToString(b), nil
 }
-
 
 // now returns the current UTC time.
 func now() time.Time { return time.Now().UTC() }
