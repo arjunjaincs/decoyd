@@ -33,6 +33,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/arjunjaincs/decoyd/internal/alert"
+	"github.com/arjunjaincs/decoyd/internal/attribution"
 	"github.com/arjunjaincs/decoyd/internal/sanitize"
 	"github.com/arjunjaincs/decoyd/internal/store"
 	"github.com/arjunjaincs/decoyd/internal/triglog"
@@ -74,17 +75,6 @@ type linuxWatcher struct {
 	stopCh chan struct{}
 	// done is closed by the event loop goroutine when it exits.
 	done chan struct{}
-}
-
-func newPlatformImpl(st *store.Store, dataDir string) (watcherImpl, error) {
-	return &linuxWatcher{
-		st:      st,
-		dataDir: dataDir,
-		cfg:     DefaultWatcherConfig(),
-		inoFD:   -1,
-		stopR:   -1,
-		stopW:   -1,
-	}, nil
 }
 
 // ----------------------------------------------------------------------------
@@ -606,6 +596,103 @@ func (w *linuxWatcher) dispatch(rateMap map[string]*rateEntry, tok DeployedToken
 		Path:        sanitize.Sanitize(tok.DeployedPath, 512),
 		TriggeredAt: now.UTC(),
 		Detail:      sanitize.Sanitize("file "+evType, 128),
+	}
+	if sendErr := a.Send(ctx, payload); sendErr != nil {
+		ev.Status = triglog.TriggerFailed
+		ev.AlertError = alert.SanitizeErrString(sendErr)
+	} else {
+		ev.Status = triglog.TriggerSent
+	}
+	_ = triglog.Append(w.dataDir, ev)
+}
+
+// ----------------------------------------------------------------------------
+// dispatchFanotifyEvent — called from the fanotify dispatch goroutine (T2)
+// ----------------------------------------------------------------------------
+
+// fanotifyRateMap is owned by dispatchFanotifyEvent calls; not shared with inotify.
+// Because dispatchFanotifyEvent is called from a single goroutine, no mutex needed.
+var fanotifyRateMap = map[string]*rateEntry{}
+
+// dispatchFanotifyEvent dispatches an alert for a fanotify-detected access.
+// Called from hybridLinuxWatcher.runFanotifyDispatch (single goroutine).
+// attr may be nil when attribution data is unavailable.
+func (w *linuxWatcher) dispatchFanotifyEvent(tok DeployedToken, pid int32, attr *attribution.Attribution) {
+	now := time.Now()
+
+	// Generate a unique event ID.
+	evID := newEventID()
+
+	ev := triglog.TriggerEvent{
+		ID:          evID,
+		TokenID:     tok.ID,
+		TokenType:   tok.Type,
+		Path:        tok.DeployedPath,
+		TriggeredAt: now.UTC(),
+		EventType:   "access",
+		Status:      triglog.TriggerPending,
+		WatcherTier: "tier1",
+		Attribution: attr,
+	}
+
+	// Quiet hours check.
+	if w.cfg.inQuietHours(now) {
+		ev.Status = triglog.TriggerQuietHours
+		_ = triglog.Append(w.dataDir, ev)
+		return
+	}
+
+	// Rate-limit check.
+	limit := w.cfg.RateLimit
+	if limit <= 0 {
+		limit = 5
+	}
+	re := fanotifyRateMap[tok.ID]
+	if re == nil || now.After(re.windowEnd) {
+		fanotifyRateMap[tok.ID] = &rateEntry{count: 1, windowEnd: now.Add(time.Hour)}
+	} else {
+		re.count++
+		if re.count > limit {
+			ev.Status = triglog.TriggerRateLimited
+			_ = triglog.Append(w.dataDir, ev)
+			return
+		}
+	}
+
+	_ = triglog.Append(w.dataDir, ev)
+
+	alertCfg, err := alert.Load(w.dataDir)
+	if err != nil {
+		ev.Status = triglog.TriggerFailed
+		ev.AlertError = "failed to load alert config"
+		_ = triglog.Append(w.dataDir, ev)
+		return
+	}
+	ch, ok := alertCfg.ChannelForToken(tok.AlertChannelID)
+	if !ok {
+		ev.Status = triglog.TriggerFailed
+		ev.AlertError = "no alert channel configured"
+		_ = triglog.Append(w.dataDir, ev)
+		return
+	}
+	a, err := alert.NewAlerter(ch)
+	if err != nil {
+		ev.Status = triglog.TriggerFailed
+		ev.AlertError = alert.SanitizeErrString(err)
+		_ = triglog.Append(w.dataDir, ev)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+
+	detail := fmt.Sprintf("fanotify access pid=%d", pid)
+	payload := alert.AlertPayload{
+		TokenID:     sanitize.Sanitize(tok.ID, 64),
+		TokenType:   sanitize.Sanitize(tok.Type, 64),
+		Path:        sanitize.Sanitize(tok.DeployedPath, 512),
+		TriggeredAt: now.UTC(),
+		Detail:      sanitize.Sanitize(detail, 128),
 	}
 	if sendErr := a.Send(ctx, payload); sendErr != nil {
 		ev.Status = triglog.TriggerFailed

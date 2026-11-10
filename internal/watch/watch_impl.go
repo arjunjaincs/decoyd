@@ -21,3 +21,9 @@ type watcherImpl interface {
 func newImpl(st *store.Store, dataDir string) (watcherImpl, error) {
 	return newPlatformImpl(st, dataDir)
 }
+
+// newImplWithOptions constructs the platform-specific implementation with options.
+// Implemented in hybrid_linux.go (Linux) and watch_windows.go (Windows, options ignored).
+func newImplWithOptions(st *store.Store, dataDir string, opts WatchOptions) (watcherImpl, error) {
+	return newPlatformImplWithOptions(st, dataDir, opts)
+}

@@ -20,10 +20,14 @@ import (
 // st is intentionally absent: the watcher runs with nil st (headless mode),
 // reading token paths from deployed_tokens.json and writing triggers to
 // triggers.jsonl.  It does not open decoyd.db.
-func cmdWatch(dataDir string) error {
-	w, err := watch.New(nil, dataDir) // nil = headless, no bbolt
+//
+// When tier1 is true, requires fanotify-based detection (Linux only).
+// Errors if fanotify is unavailable — no silent downgrade (O6).
+func cmdWatch(dataDir string, tier1 bool) error {
+	opts := watch.WatchOptions{Tier1: tier1}
+	w, err := watch.NewWithOptions(nil, dataDir, opts) // nil = headless, no bbolt
 	if err != nil {
-		return err // watch.New errors are already user-facing
+		return err // watch.NewWithOptions errors are already user-facing
 	}
 	if err := w.Start(); err != nil {
 		return err // ErrWatcherRunning etc. are already user-facing

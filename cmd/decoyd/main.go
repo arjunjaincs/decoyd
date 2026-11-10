@@ -37,13 +37,33 @@ func run(args []string) error {
 	if len(args) > 0 {
 		switch args[0] {
 		case "watch":
-			return cmdWatch(dataDir)
+			tier1 := false
+			for _, a := range args[1:] {
+				if a == "--tier1" {
+					tier1 = true
+				}
+			}
+			return cmdWatch(dataDir, tier1)
 		case "install":
+			for _, a := range args[1:] {
+				if a == "--system" {
+					return cmdInstallSystem()
+				}
+			}
 			return cmdInstall(dataDir)
 		case "uninstall":
+			for _, a := range args[1:] {
+				if a == "--system" {
+					return cmdUninstallSystem()
+				}
+			}
 			return cmdUninstall(dataDir)
+		case "sync":
+			return cmdSync(dataDir)
 		case "triggers":
 			return cmdTriggers(dataDir)
+		case "events":
+			return cmdEvents(dataDir, args[1:])
 		case "test":
 			return cmdSelfTest(dataDir)
 		case "doctor":
@@ -235,11 +255,15 @@ Commands:
   list               Print all token records in a tab-aligned table
   remove <id>        Delete a token record (deployed file is NOT removed)
   remove --purge <id> Delete a token record AND its deployed file from disk
-  watch              Run the headless file watcher (alert on token access)
+  watch [--tier1]    Run the headless file watcher (alert on token access)
+                     --tier1: require fanotify-based Tier 1 detection (Linux only)
   install            Install decoyd watch as a system service (systemd on Linux,
                      Task Scheduler on Windows)
   uninstall          Remove the installed system service
-  triggers           Print recent trigger events
+  triggers           Print recent trigger events (alias; see events)
+  events             Print trigger events with schema v1 fields
+                     Flags: --json --since DURATION --token ID --limit N --fail-if-any
+                     Exit code 3 when --fail-if-any and events exist
   test               Self-test: deploy temp decoy, start watcher, assert alert arrives
   doctor [--json]    Run health checks (platform, data dir, DB lock, alert config)
   help               Show this help

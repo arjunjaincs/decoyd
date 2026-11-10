@@ -62,6 +62,11 @@ type windowsWatcher struct {
 }
 
 func newPlatformImpl(st *store.Store, dataDir string) (watcherImpl, error) {
+	return newPlatformImplWithOptions(st, dataDir, WatchOptions{})
+}
+
+// newPlatformImplWithOptions — Windows does not use fanotify; options are ignored.
+func newPlatformImplWithOptions(st *store.Store, dataDir string, _ WatchOptions) (watcherImpl, error) {
 	return &windowsWatcher{
 		st:      st,
 		dataDir: dataDir,
