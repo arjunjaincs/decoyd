@@ -1,8 +1,9 @@
 # ADR 0001 — Tier-1 / Tier-2 Privilege Model for Decoyd Watchers
 
-**Status**: PROPOSED  
+**Status**: ACCEPTED  
 **Date**: 2026-11-09  
-**Authors**: batch/hardening-1  
+**Amended**: 2026-11-10 (Phase 2 — owner decisions O1–O8 incorporated)  
+**Authors**: batch/hardening-1, batch/tier1-v1  
 
 ---
 
@@ -11,91 +12,127 @@
 Decoyd uses Linux inotify to detect reads of deployed canary-token files.
 inotify requires no special privilege for files the process can already `open()`.
 A second detection tier — fanotify — can intercept events on paths the process
-does not own, and can optionally block access (`FAN_*_PERM`). fanotify requires
-`CAP_SYS_ADMIN` or root.
-
-The question is: **how much privilege should Decoyd's watcher hold, and
-through what mechanism?**
-
-Three options were evaluated:
-
-| Option | Mechanism | Privilege | Blocking? | ADR decision |
-|--------|-----------|-----------|-----------|--------------|
-| A | inotify only (current) | None | No | Tier 1 baseline |
-| B | fanotify notification class via system unit | root or CAP_SYS_ADMIN | No | Preferred for Tier 2 |
-| B+ | Option B + sudoers / systemd system unit | root | No | **Selected (PROPOSED)** |
-| C | fanotify permission events (`FAN_*_PERM`) | root | Yes | Rejected — see below |
+does not own. fanotify requires `CAP_SYS_ADMIN` or root.
 
 ---
 
-## Decision: Option B+ (sudoers / system unit, notification-only fanotify)
+## Decision: Tier 1 fanotify (notification-only, hybrid with inotify)
 
-### What it means
+The following owner decisions (O1–O8) are **ACCEPTED** and binding for
+all Phase 2 implementation:
 
-1. **Tier 1 (default)**: The existing inotify-based watcher runs as the
-   unprivileged user. No change to current behaviour. Detects reads on files
-   the user owns.
+### O1 — fanotify class and fd handling
 
-2. **Tier 2 (opt-in)**: A separate process (`decoyd-watch-privileged`) runs
-   as root under a **systemd system unit** (not a user unit). The binary is
-   installed with `setuid root` or invoked via a sudoers rule that
-   restricts it to a specific, non-writable path. It opens a fanotify
-   instance with `FAN_CLASS_NOTIF` (notification class only — never
-   `FAN_CLASS_CONTENT` or any `FAN_*_PERM` flag).
+- fanotify instance class: `FAN_CLASS_NOTIF` (notification only).  
+- Mode: plain fd mode — **no** `FAN_REPORT_FID`.  
+- Mark type: inode marks via `FAN_MARK_ADD` with mask `FAN_OPEN|FAN_ACCESS`.  
+- **Never** use any `FAN_*_PERM` flag in any form.  
+- Close **every** event fd (defer immediately after read, even on parse errors).  
+- Handle `FAN_Q_OVERFLOW`: log `"decoyd fanotify: event queue overflow"` and
+  continue; do not stop the watcher.
 
-3. **CAP_SYS_PTRACE**: Not required. fanotify notification class does not
-   need it. Option B+ intentionally avoids CAP_SYS_PTRACE.
+### O2 — Hybrid fanotify + inotify
 
-4. **No `FAN_*_PERM` events**: Permission events that block file access
-   are explicitly forbidden (AGENTS.md rule 15 and this ADR). They would
-   introduce denial-of-service risk and require a separate `FAN_CLASS_CONTENT`
-   instance.
+- fanotify supplies open/access events plus pid.  
+- inotify keeps modify/move/delete events and the parent-directory watches,
+  and re-adds the fanotify mark on file recreate.  
+- While a token's fanotify mark is active, inotify open/access events **do
+  not** alert for that token (deduplication).  
+- If marking fails (EPERM, ENODEV, EOPNOTSUPP, ENOENT): fall back to inotify
+  for that token silently and report the fallback in `decoyd doctor`.
 
-5. **No `FAN_REPORT_FID`**: Not used unless a future ADR approves it
-   (AGENTS.md rule 15).
+### O3 — Privilege model
 
-### Rationale
+- Persistent daemon mode: a **system unit** running as root.  
+- Binary at root-owned `/usr/local/bin/decoyd` (never a user-writable path).  
+- Explicit `--data-dir` required (HOME changes under sudo).  
+- `CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_DAC_READ_SEARCH`
+  with rationale:
+  - `CAP_SYS_ADMIN`: required for `fanotify_init(2)`.
+  - `CAP_SYS_PTRACE`: required for reading `/proc/<pid>/exe` of other users.
+  - `CAP_DAC_READ_SEARCH`: required for traversing 0700 home directories.  
+- `NoNewPrivileges=yes`.  
+- `ProtectSystem=strict`, `ReadWritePaths=/var/lib/decoyd`.  
+- No `SystemCallFilter` unless validated on a real systemd installation.
 
-- **Security**: Running as root is narrowed by the systemd `NoNewPrivileges`,
-  `MemoryDenyWriteExecute`, `RestrictSUIDSGID`, and `SystemCallArchitectures`
-  hardening already applied to the user unit (A11). The system unit will carry
-  the same hardening plus `CapabilityBoundingSet=CAP_SYS_ADMIN`.
-- **Simplicity**: No kernel module, no eBPF. fanotify is stable since
-  Linux 2.6.37.
-- **Reversibility**: Uninstalling the system unit leaves no residual
-  privilege. The sudoers rule is in its own file under `/etc/sudoers.d/`.
-- **Auditability**: The privileged binary has a minimal surface: open fanotify
-  fd, loop on read, forward event JSON to unprivileged parent via unix socket.
+### O4 — Root never writes into user-writable directories
 
-### Rejected: Option C (FAN\_\*\_PERM)
+- Daemon state (triggers.jsonl, pid): `/var/lib/decoyd` (root-owned, 0644 files, no secrets).  
+- Alert config: copied one-way into `/etc/decoyd` (0600 root) by `sudo decoyd sync`.  
+- TUI/CLI read the daemon's triggers.jsonl.
 
-Permission events block the process reading the file until Decoyd responds.
-This creates a denial-of-service vector if Decoyd crashes or is slow. It also
-requires `FAN_CLASS_CONTENT`, which cannot coexist safely with
-`FAN_CLASS_NOTIF` on the same inotify instance. AGENTS.md rule 15 prohibits
-`FAN_*_PERM` without an approved ADR — this ADR explicitly rejects it.
+### O5 — Trust model for path reads
+
+For every path read from a user-writable snapshot, the daemon must:
+1. `Lstat` the path.
+2. Refuse if it is a symlink (not `S_IFREG`).
+3. Require the file is owned by the snapshot-recorded UID.
+4. If any check fails: skip and log; never error-exit.
+
+### O6 — Foreground tier-1 mode
+
+`decoyd watch --tier1`: foreground mode for demos and CI.  
+Errors immediately if Tier 1 (fanotify) is unavailable — no silent downgrade.
+
+### O7 — Attribution fields
+
+For every fanotify event, collect:
+- pid, ppid chain (depth ≤ 8), comm, exe, cmdline (capped 4 KB).
+- cwd, uid, start ticks, exe SHA-256 (size cap 100 MB, cached by path+mtime+size).
+- Environment: read **only** `npm_package_name`, `npm_package_version`,
+  `npm_lifecycle_event`; never store or log the full environ.
+- Computed in the dispatch worker (not the event loop — avoid blocking reads).
+
+### O8 — Events never contain token values
+
+No TriggerEvent, alert payload, or log entry may contain the content of a
+deployed token file. Token IDs and types are permitted; values are not.
 
 ---
 
-## Implementation notes (not yet implemented)
+## Implementation (Phase 2)
 
-The following is design intent; no code exists yet. A future task must:
+Tasks and files:
 
-1. Create `internal/watch/watch_privileged_linux.go` — the privileged child
-   process that opens fanotify and writes newline-delimited JSON events to
-   stdout/a socket.
-2. Update `cmd/decoyd/cmd_install_linux.go` to conditionally install the
-   system unit when `--tier2` flag is passed.
-3. Write a sudoers snippet to `docs/examples/decoyd.sudoers`.
-4. Add an integration test (marked `//go:build integration`) that probes
-   `fanotify_init(2)` and skips if `EPERM`.
-5. Update `decoyd doctor` to report the achieved tier.
+| Task | File(s) | Description |
+|------|---------|-------------|
+| T2 | `internal/watch/fanotify_linux.go` | fanotify watcher + event loop |
+| T2 | `internal/watch/hybrid_linux.go` | hybrid fanotify+inotify coordinator |
+| T3 | `internal/watch/procinfo_linux.go` | /proc attribution parser |
+| T4 | `internal/attribution/attribution.go` | ProcessInfo, Attribution types |
+| T5 | `internal/triglog/triglog.go` (amend) | Schema v1: Attribution + WatcherTier |
+| T5 | `cmd/decoyd/cmd_events.go` | `decoyd events` subcommand |
+| T6 | `cmd/decoyd/cmd_install_linux.go` (amend) | `--system` install flag |
+
+### Key constraints
+
+- Event parsing: `encoding/binary`, no `unsafe`.
+- Validate `event_len` and `metadata_len` before advancing buffer.
+- Fuzz target: `FuzzParseFanotifyEvents` — never panics, never out-of-bounds.
+- Source-level test: fails if any `_PERM` constant is referenced in package watch.
+- Privileged integration test (build tag `privileged`): child `cat` reads decoy,
+  expect event with matching pid and exe ending in `cat`.
+- `FAN_Q_OVERFLOW`: log + continue (do not re-fire tokens in first version).
+
+---
+
+## Rejected options
+
+**Option C (FAN_*_PERM)**: Permission events block the reading process.
+Creates denial-of-service risk; requires `FAN_CLASS_CONTENT`; explicitly
+prohibited by AGENTS.md rule 15 and this ADR.
+
+**FAN_REPORT_FID**: Requires approved ADR amendment (AGENTS.md rule 15).
+Not included in Phase 2.
+
+**setuid binary**: Increases attack surface; system unit with bounded
+capabilities is cleaner and auditable.
 
 ---
 
 ## References
 
-- `fanotify(7)` man page: https://man7.org/linux/man-pages/man7/fanotify.7.html
+- `fanotify(7)`: https://man7.org/linux/man-pages/man7/fanotify.7.html
 - `fanotify_init(2)`: https://man7.org/linux/man-pages/man2/fanotify_init.2.html
 - AGENTS.md rule 15 (fanotify constraints)
 - ADR format: https://adr.github.io/
