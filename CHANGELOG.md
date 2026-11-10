@@ -1,35 +1,69 @@
 # Changelog
 
-All notable changes are documented here. Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
+All notable changes to Decoyd are documented here.
+Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — batch/hardening-1
-
-### Security
-- **A6** `internal/deploy`: `O_NOFOLLOW|O_EXCL` on Linux; `O_EXCL` + reparse-point refusal on Windows; fd-based `chmod(0600/0644)`; secret-type directories created `0700`. Rolls back private key on `.pub` write failure.
-- **A9** `internal/sanitize`: new package — strips ANSI, C0/C1 control chars, bidi overrides, zero-width chars; truncates to 512 code points. Applied to all alert sinks. Discord `allowed_mentions: {"parse":[]}`. Slack `plain_text` objects.
-- **A12** `internal/filelock`: advisory file locking (flock/LockFileEx) serialises all `triglog` mutations. `fsync` before rename in `DeleteOne`.
-- **A14** `cmd/decoyd/cmd_doctor.go`: `decoyd doctor` reports data-dir permissions, DB lock status, snapshot validity, alert config presence, per-decoy filesystem type, platform/kernel, detection tier.
+## [Unreleased] — 1.0.0-rc
 
 ### Added
-- **A5** `Watcher.Reload()`: TUI calls it after deploy/delete; headless watcher polls `deployed_tokens.json` mtime/size every 5 s.
-- **A7** Token fingerprint improvements: AWS key body is base32 (A–Z, 2–7); kubeconfig uses random 8-char names; DNS canary file contains label value only (instructions shown in TUI).
-- **A8** `internal/alert`: dedicated `http.Client` with dial/TLS/response-header timeouts; `io.LimitReader(64 KB)`; `ErrWebhookRedirected` sentinel; no auto-follow redirects.
-- **A10** `cmd/decoyd/install_helpers.go`: `quoteExecStart` for systemd `ExecStart`; Windows uses `-EncodedCommand` (UTF-16LE base64).
-- **A11** Systemd unit hardening: `NoNewPrivileges`, `LockPersonality`, `RestrictRealtime`, `RestrictSUIDSGID`, `SystemCallArchitectures=native`, `MemoryDenyWriteExecute`. `decoyd uninstall` command.
-- **A13** `internal/watch`: one suppression alert per token per rate-limit window; rate-limited events logged to triglog.
-- **A15** `decoyd test` self-test: deploys temp decoy, starts watcher, reads file, asserts alert arrives within 8 s via httptest server.
 
-### Fixed / Hardened
-- **A0** Stripped UTF-8 BOM from 5 `.go` files. CI step prevents re-introduction.
-- **A1** `.gitattributes` enforces LF line endings. `gofmt` clean.
-- **A2** `internal/watch`: `wdMap` promoted to struct field, protected by `sync.RWMutex`.
-- **A3** Hermetic tests: `config_test.go` uses `t.Setenv("HOME"/"APPDATA")`.
-- **A4** CI: `permissions: contents: read`; all actions pinned to full commit SHA; `govulncheck@v1.9.0`, `gosec@v2.30.0`, `staticcheck`, `go vet`, `gofmt -l`.
+**Phase 1 — Hardening**
+- Central `AlertPayload.Sanitized()` for all sinks; per-sink escaping preserved
+- Entropy-stripped denylist test at `-count=200` (strips 16+ char high-entropy runs before checking)
+- Root-outside-system path warning on deploy
+- Windows deploy variant refusing reparse points
+- Toolchain directive `go1.26.10` in `go.mod` after govulncheck clean
 
-### Docs
-- **A16** `docs/detection_matrix.md`: measured inotify coverage per operation (os.ReadFile, mmap, io.Copy, cat, cp, grep, head, stat, ls).
-- **A17** `docs/adr/0001-tier1-privilege.md`: ADR selecting Option B+ (notification-only fanotify via system unit, no FAN\_\*\_PERM).
+**Phase 2 — Tier 1 (fanotify)**
+- `fanotify_linux.go`: fanotify watcher (notification class, no `*_PERM`, close every event fd)
+- `procinfo_linux.go`: procfs attribution (pid, ppid chain ≤8, comm, exe, cmdline, uid, start ticks)
+- `attribution/`: ProcessInfo, Attribution, PackageAttribution types
+- Hybrid coordinator: fanotify (open/access + pid) + inotify (modify/move/delete + parent-dir)
+- `decoyd watch --tier1` foreground mode; errors if Tier 1 unavailable
+- Schema v1: `schema_version`, `watcher_tier`, `process`, `package` fields in TriggerEvent
+- `decoyd events [--follow] [--json] [--since] [--fail-if-any]` CLI command
+- `docs/EVENT-SCHEMA.md` documenting schema v1
+- System install: `sudo decoyd install --system`, `sync`, `uninstall --system`
+- ADR 0001 accepted with O1–O8 owner decisions
 
-## [0.1.0] — initial release
+**Phase 3 — New Token Types**
+- `.npmrc` (npm access token, `npm_` prefix per npm docs)
+- `.pypirc` (PyPI API token, `pypi-` prefix per PyPI docs)
+- `~/.docker/config.json` (Docker registry credentials)
+- `.git-credentials` (Git credential store with GitHub PAT)
+- `.netrc` (FTP/HTTP authentication credentials)
+- `id_rsa` (RSA-2048 PKCS#1 PEM private key — real but unregistered)
+- GCP service account JSON (PKCS#8 key, 40-hex key_id, 21-digit client_id)
+- `credentials.tfrc.json` (Terraform Cloud credentials — format UNKNOWN, flagged)
+- `.vault-token` (HashiCorp Vault service token, `s.` prefix)
+- `~/.cursor/mcp.json` (MCP server config with GitHub PAT)
 
-Initial public release with TUI, inotify-based watcher, Discord/Slack/Telegram/Teams/ntfy/webhook alert channels.
+**Phase 4 — Detection Content, Demo, CI**
+- `detection/decoyd-wazuh.xml`: Wazuh decoder + rules (UNVALIDATED against real Wazuh)
+- `detection/decoyd.yml`: Sigma rules for token access (UNVALIDATED against real Sigma toolchain)
+- `docs/ATTACK-MAPPING.md`: ATT&CK T1552.001 and related mapping
+- `cmd/decoyd-emu`: Read-only benign credential location scanner binary
+- `examples/demo-evil-pkg`: Harmless npm package simulating postinstall credential scan
+- `examples/github-action/decoyd-demo.yml`: GitHub Actions demo workflow
+- Benchmark tests in `internal/watch/bench_test.go`
+- CI: `.github/workflows/ci-privileged.yml` (privileged + Windows jobs)
+
+### Changed
+- `deploy` now refuses symlinks (Lstat, O_NOFOLLOW on Linux) and Windows reparse points
+- Alert sanitization now applied at `AlertPayload` construction; sanitize before build, then per-sink escape
+
+### Removed
+- `safeRandStr` / `safeRandB64` retry hack in token generator (replaced by proper entropy generation)
+
+### Fixed
+- Teams alerter was not escaping markdown in alert bodies (now uses `AlertPayload.Sanitized()`)
+- wdMap race condition in inotify watcher (fixed by B1 commit)
+- SSH key comment no longer contains static identifiers
+
+---
+
+## Previous Development (pre-1.0)
+
+Earlier work (A-series, B-series commits) covered initial alert/token/watcher
+infrastructure. See `git log` for full history.

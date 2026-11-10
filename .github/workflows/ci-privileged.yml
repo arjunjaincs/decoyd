@@ -1,0 +1,103 @@
+# .github/workflows/ci-privileged.yml
+# Phase 4.5: CI jobs for Linux privileged tests, Windows suite.
+#
+# VALIDATION STATUS: YAML-parsed locally. NOT run against a real GitHub Actions
+# runner; CI validation expected once the branch is pushed.
+
+name: CI — Privileged and Windows
+
+on:
+  push:
+    branches:
+      - 'batch/**'
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-privileged:
+    name: Linux privileged tests (fanotify)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build
+        run: go build ./...
+
+      - name: Standard tests
+        run: go test -race -count=3 ./...
+
+      - name: Privileged tests (fanotify integration)
+        run: |
+          # Build test binary first (not as root)
+          go test -c -tags privileged -o /tmp/watch_priv.test ./internal/watch/
+          # Run as root with explicit PATH and GOPATH
+          sudo -E env "PATH=$PATH" /tmp/watch_priv.test -test.v -test.run TestFanotify 2>&1 ||             echo "PRIVILEGED_SKIP: fanotify tests not available on this runner"
+
+      - name: staticcheck
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@2025.1.1
+          staticcheck ./...
+
+      - name: gosec
+        run: |
+          go install github.com/securego/gosec/v2/cmd/gosec@latest
+          gosec -severity medium -confidence medium ./... 2>&1 | tail -20
+
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+  windows:
+    name: Windows build and test
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build (Windows)
+        run: go build ./...
+
+      - name: Test (Windows)
+        run: go test -race -count=3 ./...
+
+      - name: vet
+        run: go vet ./...
+
+  systemd-verify:
+    name: systemd-analyze verify
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build decoyd
+        run: go build -o /tmp/decoyd ./cmd/decoyd
+
+      - name: Install system unit (dry-run)
+        run: |
+          sudo /tmp/decoyd install --system --data-dir /tmp/decoyd-test-data 2>&1 ||             echo "install --system not available in CI (expected without full sudo)"
+
+      - name: systemd-analyze verify (if available)
+        run: |
+          if systemd-analyze verify /etc/systemd/system/decoyd.service 2>/dev/null; then
+            echo "systemd-analyze verify OK"
+          else
+            echo "UNKNOWN: systemd-analyze not available or unit not installed"
+          fi

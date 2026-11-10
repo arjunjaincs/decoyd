@@ -1,0 +1,92 @@
+# examples/github-action/decoyd-demo.yml
+# GitHub Actions workflow demonstrating Decoyd credential-access detection.
+#
+# Flow: build -> deploy decoys -> watch --tier1 -> install demo pkg -> assert alert
+#
+# VALIDATION STATUS: YAML-parsed locally. NOT run against a real GitHub Actions
+# runner; CI validation expected once the branch is pushed.
+
+name: Decoyd Demo — Credential Access Detection
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'examples/github-action/**'
+      - 'cmd/decoyd/**'
+      - 'cmd/decoyd-emu/**'
+
+permissions:
+  contents: read
+
+jobs:
+  decoyd-demo:
+    name: Decoyd credential-access demo
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build decoyd and decoyd-emu
+        run: |
+          go build -o /tmp/decoyd ./cmd/decoyd
+          go build -o /tmp/decoyd-emu ./cmd/decoyd-emu
+          sudo install -m 0755 /tmp/decoyd /usr/local/bin/decoyd
+          sudo install -m 0755 /tmp/decoyd-emu /usr/local/bin/decoyd-emu
+
+      - name: Deploy decoy credential files
+        run: |
+          DATA_DIR="$HOME/.decoyd-demo"
+          mkdir -p "$DATA_DIR"
+          decoyd deploy --all --data-dir "$DATA_DIR"
+          echo "DATA_DIR=$DATA_DIR" >> "$GITHUB_ENV"
+
+      - name: Start decoyd watch (Tier 1, background)
+        run: |
+          sudo -E /usr/local/bin/decoyd watch --tier1 --data-dir "$DATA_DIR" > /tmp/decoyd-watch.log 2>&1 &
+          echo "DECOYD_PID=$!" >> "$GITHUB_ENV"
+          sleep 2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install demo-evil-pkg (triggers postinstall scan)
+        run: npm install --no-save ./examples/demo-evil-pkg
+        continue-on-error: true
+
+      - name: Wait for event processing
+        run: sleep 3
+
+      - name: Assert Decoyd detected the access
+        run: |
+          echo "=== Recent Decoyd events ==="
+          decoyd events --json --data-dir "$DATA_DIR" || true
+          echo ""
+          echo "=== Checking for credential access events ==="
+          decoyd events --fail-if-any --data-dir "$DATA_DIR"
+          RESULT=$?
+          if [ "$RESULT" -eq 3 ]; then
+            echo "SUCCESS: Decoyd detected credential access!"
+            exit 0
+          else
+            echo "UNEXPECTED exit code: $RESULT (expected 3)"
+            exit 1
+          fi
+
+      - name: Stop decoyd
+        if: always()
+        run: |
+          if [ -n "$DECOYD_PID" ]; then
+            sudo kill "$DECOYD_PID" 2>/dev/null || true
+          fi
+          echo "=== decoyd watch log ==="
+          cat /tmp/decoyd-watch.log || true

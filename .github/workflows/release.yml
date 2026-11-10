@@ -1,0 +1,46 @@
+# .github/workflows/release.yml
+# Triggered on tags matching v*.
+# Requires: contents:write, id-token:write (for cosign keyless signing).
+#
+# VALIDATION STATUS: YAML-parsed locally. NOT run against real GitHub Actions.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  release:
+    name: goreleaser release
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Install syft (for SBOM)
+        uses: anchore/sbom-action/download-syft@v0
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: '~> v2'
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

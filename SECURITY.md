@@ -1,42 +1,64 @@
 # Security Policy
 
-## Supported versions
+## Supported Versions
 
-Decoyd is in active development. Only the `main` branch receives security fixes.
+| Version | Supported |
+|---------|-----------|
+| `main` (HEAD) | ✅ |
+| Earlier | ❌ — upgrade to main |
 
-## Reporting a vulnerability
+## Reporting a Vulnerability
 
-**Do not open a public GitHub issue for security vulnerabilities.**
+**Please do NOT file a public GitHub issue for security vulnerabilities.**
 
-Please email the maintainer directly (see `git log` for author contact) with:
+Report security issues to: **[use the GitHub Private Security Advisory feature]**
 
-1. A description of the vulnerability and affected component(s).
-2. Steps to reproduce or a proof-of-concept (benign test only — no real malware).
-3. Potential impact.
+Go to the repository → Security → Advisories → New draft security advisory.
 
-You will receive an acknowledgement within 72 hours and a fix timeline within 7
-days. Coordinated disclosure is preferred.
+Include:
+1. Description of the vulnerability
+2. Steps to reproduce (minimal PoC if possible)
+3. Affected versions
+4. Potential impact
+
+You will receive an acknowledgement within 7 days and a resolution within 90 days
+(we aim for 30 days for critical issues).
 
 ## Scope
 
-| In scope | Out of scope |
-|----------|-------------|
-| Token generation fingerprinting (rule 12) | Physical security |
-| Alert injection / webhook abuse | Third-party alert sink bugs |
-| File-deploy path traversal (rule 14) | Bugs in external dependencies |
-| Sanitization bypass (rule 13) | Social engineering |
-| Privilege escalation in Tier-2 mode (ADR 0001) | WSL / Windows kernel bugs |
+**In scope:**
+- Decoyd binary (cmd/decoyd, cmd/decoyd-emu)
+- Alert channel credential handling
+- Token generator output containing static identifiers
+- Privilege escalation in `sudo decoyd install --system`
+- Race conditions or data corruption in trigger log
 
-## Security design notes
+**Out of scope:**
+- Security of the monitoring infrastructure itself (Wazuh, Slack, etc.)
+- Vulnerabilities in Go standard library or third-party dependencies
+  (report to the Go security team or the dependency maintainer)
 
-- Generated token files contain **no static identifiers** (rule 12). Value
-  uniqueness is ensured by CSPRNG; labels are shown in the TUI, never embedded.
-- All external strings entering alert payloads are sanitized: ANSI stripped,
-  C0/C1 control chars removed, bidi overrides removed, length capped at 512
-  code points (rule 13, `internal/sanitize`).
-- File deploy uses `O_EXCL | O_NOFOLLOW` on Linux to refuse symlink targets
-  (rule 14, `internal/deploy`).
-- Alert HTTP client enforces dial/TLS/response-header timeouts, `io.LimitReader`
-  (64 KB), and no-redirect policy (`internal/alert`).
-- Trigger-log writes are serialized through `internal/filelock` (advisory
-  `flock`/`LockFileEx`).
+## Security Design
+
+Decoyd is a **deception-based detection tool**. Its security model is:
+
+1. **Generated tokens contain no static identifiers** — tracing a leaked credential
+   means looking up its VALUE in the database; labels are never embedded in tokens.
+
+2. **Sanitization at payload construction** — all external strings are sanitized
+   before building an `AlertPayload`; per-sink escaping is applied additionally.
+
+3. **Privileged mode (Tier 1)** runs as `root` with minimal capabilities:
+   `CAP_SYS_ADMIN` (fanotify), `CAP_SYS_PTRACE` (reading /proc), `CAP_DAC_READ_SEARCH`.
+   `NoNewPrivileges=yes`. See ADR 0001 for the full rationale.
+
+4. **fanotify uses notification class only** — never `FAN_*_PERM`; event fds are
+   always closed (even on parse errors).
+
+5. **Deploy uses `O_EXCL`** — will not overwrite an existing file.
+   Symlinks and Windows reparse points are refused.
+
+## Dependency Security
+
+Run `govulncheck ./...` to check for known vulnerabilities in dependencies.
+The CI workflow runs govulncheck on every push.

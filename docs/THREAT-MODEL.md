@@ -2,9 +2,12 @@
 
 ## Scope
 
-This document covers the Decoyd binary running in Tier-1 mode (inotify,
-no elevated privilege) on a single Linux or Windows host. Tier-2 (fanotify)
-is PROPOSED in ADR 0001 and not yet implemented.
+This document covers the Decoyd binary running on a single Linux or Windows host.
+
+**Tier 1** (Linux, root required): fanotify-based watcher with full process attribution.
+ADR 0001 is ACCEPTED. Tier 1 is **implemented** as of batch/tier1-v1.
+
+**Tier 2** (Linux/Windows, no root): inotify/fsnotify-based watcher with token identity only.
 
 ## Assets
 
@@ -58,6 +61,24 @@ is PROPOSED in ADR 0001 and not yet implemented.
 ### T8 — Data-dir permissions
 **Threat**: Other users on the system read alert config (webhook credentials) or token metadata.  
 **Mitigation**: Deploy creates secret-type directories with `0700`; `decoyd doctor` warns if data-dir permissions are loose.
+
+### T9 — fanotify privilege escalation
+**Threat**: The Tier 1 daemon runs as root; a vulnerability could allow privilege escalation.  
+**Mitigation**: ADR O3: NoNewPrivileges=yes, ProtectSystem=strict, minimal capabilities
+(CAP_SYS_ADMIN, CAP_SYS_PTRACE, CAP_DAC_READ_SEARCH), binary at root-owned /usr/local/bin/decoyd.
+
+### T10 — pid reuse in process attribution
+**Threat**: A short-lived process touches the decoy; by the time Decoyd reads /proc/<pid>/, the
+pid has been reused by an innocent process.  
+**Mitigation**: procinfo_linux.go: re-read start_ticks after collecting all fields; discard
+attribution if ticks changed. Attribution is best-effort; the token access event is always recorded.
+
+### T11 — Token value in attribution
+**Threat**: Attribution fields (cmdline, environ) might leak the token value.  
+**Mitigation**: ADR O8: events never contain token values. Sanitization strips control chars; 
+cmdline is capped at 4 KB. Environment: only npm_package_name, npm_package_version, npm_lifecycle_event 
+are read (never the full environ).
+
 
 ## Known limitations
 

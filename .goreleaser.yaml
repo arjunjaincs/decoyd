@@ -1,0 +1,95 @@
+# .goreleaser.yaml — Decoyd release configuration
+# Run: goreleaser check         (validate config)
+#      goreleaser --snapshot     (local snapshot build, no sign, no publish)
+# DO NOT tag releases manually — CI handles this.
+#
+# Note: cosign keyless signing requires OIDC token (GitHub Actions only).
+# Skip signing for local/snapshot builds with --skip=sign.
+
+version: 2
+
+project_name: decoyd
+
+before:
+  hooks:
+    - go mod verify
+    - go generate ./...
+
+builds:
+  - id: decoyd
+    main: ./cmd/decoyd
+    binary: decoyd
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+
+  - id: decoyd-emu
+    main: ./cmd/decoyd-emu
+    binary: decoyd-emu
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+
+archives:
+  - id: default
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        format: zip
+    files:
+      - README.md
+      - LICENSE
+      - docs/EVENT-SCHEMA.md
+      - docs/ATTACK-MAPPING.md
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+sboms:
+  - artifacts: archive
+    args: ["$artifact", "--file", "$document", "--output", "spdx-json"]
+
+signs:
+  - cmd: cosign
+    certificate: "${artifact}.pem"
+    args:
+      - sign-blob
+      - "--output-certificate=${certificate}"
+      - "--output-signature=${signature}"
+      - "${artifact}"
+      - "--yes"
+    artifacts: checksum
+    output: true
+
+release:
+  draft: true
+  prerelease: auto
+  name_template: "Decoyd {{.Tag}}"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+      - Merge pull request
+      - Merge branch

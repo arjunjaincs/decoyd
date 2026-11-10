@@ -94,7 +94,7 @@ func cmdInstallSystem() error {
 
 	// Render unit file.
 	unitContent := systemUnitContent(systemBinPath)
-	if err := os.WriteFile(systemUnitPath, []byte(unitContent), 0o644); err != nil {
+	if err := os.WriteFile(systemUnitPath, []byte(unitContent), 0o644); err != nil { // #nosec G306 -- 0644 is correct for a systemd .service file (non-secret unit config)
 		return fmt.Errorf("write unit file %s: %w", systemUnitPath, err)
 	}
 	fmt.Println("unit file written:", systemUnitPath)

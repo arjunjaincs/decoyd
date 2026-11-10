@@ -61,7 +61,7 @@ func exeCacheStore(k exeCacheKey, digest string) {
 // readComm reads /proc/<pid>/comm, trims newline, caps to 15 chars, and sanitizes.
 // Returns "<unknown>" on any error.
 func readComm(pid int32, procRoot string) string {
-	data, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(int(pid)), "comm"))
+	data, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(int(pid)), "comm")) // #nosec G304 -- procRoot is an injectable test parameter (default: /proc); never user-controlled input
 	if err != nil {
 		return "<unknown>"
 	}

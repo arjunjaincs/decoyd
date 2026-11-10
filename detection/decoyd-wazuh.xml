@@ -1,0 +1,71 @@
+<!-- UNVALIDATED: not run against a real Wazuh 4.x installation.
+     Validate with: xmllint (option: noout) on decoyd-wazuh.xml -->
+<!-- Wazuh decoder and rules for Decoyd triggers.jsonl schema v1 -->
+<ossec_config>
+
+  <!-- =====================================================================
+       DECODER: parse Decoyd trigger events from triggers.jsonl
+       Log format: JSON lines written by Decoyd; each line is one TriggerEvent.
+       ===================================================================== -->
+  <decoder name="decoyd">
+    <prematch>{"schema_version":1</prematch>
+  </decoder>
+
+  <decoder name="decoyd-fields">
+    <parent>decoyd</parent>
+    <plugin_decoder>JSON_Decoder</plugin_decoder>
+  </decoder>
+
+  <!-- Field mappings (Wazuh 4.x JSON decoder auto-maps to dynamic fields):
+       decoyd.token_name  - token label
+       decoyd.token_id    - token UUID
+       decoyd.trigger_at  - RFC3339 timestamp
+       decoyd.watcher_tier - 1 (fanotify) or 2 (inotify/fsnotify)
+       decoyd.process.pid, .comm, .exe, .cmdline, .uid
+       decoyd.package.name, .version, .confidence
+  -->
+
+  <!-- =====================================================================
+       RULES
+       ===================================================================== -->
+
+  <!-- Parent rule: any Decoyd event -->
+  <rule id="100100" level="10">
+    <decoded_as>decoyd</decoded_as>
+    <description>Decoyd: credential decoy file accessed</description>
+    <group>decoyd,credential_access,T1552.001</group>
+  </rule>
+
+  <!-- Tier 1 event (fanotify — highest fidelity) -->
+  <rule id="100101" level="12" frequency="1" timeframe="1">
+    <if_sid>100100</if_sid>
+    <field name="decoyd.watcher_tier">^1$</field>
+    <description>Decoyd Tier 1: decoy accessed with process attribution (pid=$(decoyd.process.pid) exe=$(decoyd.process.exe))</description>
+    <group>decoyd,tier1,credential_access,T1552.001</group>
+  </rule>
+
+  <!-- High-confidence package attribution -->
+  <rule id="100102" level="13">
+    <if_sid>100101</if_sid>
+    <field name="decoyd.package.confidence">^high$</field>
+    <description>Decoyd: HIGH-confidence package culprit $(decoyd.package.name)@$(decoyd.package.version)</description>
+    <group>decoyd,supply_chain,T1195.002</group>
+  </rule>
+
+  <!-- Multiple tokens accessed in short window (potential sweep) -->
+  <rule id="100103" level="14" frequency="3" timeframe="60">
+    <if_sid>100100</if_sid>
+    <same_field>decoyd.process.pid</same_field>
+    <description>Decoyd: same process accessed 3+ decoy tokens within 60s — possible credential sweep</description>
+    <group>decoyd,sweep,credential_access,T1552.001</group>
+  </rule>
+
+  <!-- Tier 2 fallback event (inotify / fsnotify) -->
+  <rule id="100104" level="10">
+    <if_sid>100100</if_sid>
+    <field name="decoyd.watcher_tier">^2$</field>
+    <description>Decoyd Tier 2: decoy accessed (no process attribution)</description>
+    <group>decoyd,tier2,credential_access,T1552.001</group>
+  </rule>
+
+</ossec_config>
