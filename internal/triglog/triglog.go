@@ -229,11 +229,66 @@ func ClearAll(dataDir string) error {
 // remove a record after the fact. The rewrite is atomic: a temp file is
 // written first and then renamed over the original so a crash mid-write
 // cannot corrupt the log.
+// loadLocked reads and parses the triglog at path without acquiring the filelock.
+// Must only be called while the caller already holds the lock for path.
+func loadLocked(path string) ([]TriggerEvent, error) {
+	// #nosec G304 -- path is always filepath.Join(dataDir, logFileName)
+	f, err := os.Open(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("triglog open: %w", err)
+	}
+	defer f.Close()
+
+	// Inline scan: same deduplication logic as Load.
+	seen := make(map[string]TriggerEvent)
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var te TriggerEvent
+		if err := json.Unmarshal(line, &te); err != nil {
+			continue
+		}
+		if te.ID != "" {
+			seen[te.ID] = te
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("triglog scan: %w", err)
+	}
+	events := make([]TriggerEvent, 0, len(seen))
+	for _, te := range seen {
+		events = append(events, te)
+	}
+	sort.Slice(events, func(i, j int) bool {
+		return events[i].TriggeredAt.After(events[j].TriggeredAt)
+	})
+	return events, nil
+}
+
 func DeleteOne(dataDir, id string) error {
 	if id == "" {
 		return nil
 	}
-	all, err := Load(dataDir)
+
+	// Acquire the lock BEFORE reading so that events appended concurrently
+	// are not silently discarded by the subsequent write-back.
+	// (Previously, Load ran outside the lock, creating a window where
+	// concurrent Appends were lost when DeleteOne rewrote the file.)
+	path := logPath(dataDir)
+	lf, err := filelock.Lock(path)
+	if err != nil {
+		return fmt.Errorf("triglog lock: %w", err)
+	}
+	defer lf.Unlock()
+
+	// Re-read under the lock to get the authoritative set.
+	all, err := loadLocked(path)
 	if err != nil {
 		return err
 	}
@@ -248,14 +303,6 @@ func DeleteOne(dataDir, id string) error {
 	if len(filtered) == len(all) {
 		return nil // nothing to do
 	}
-
-	// Write a temp file, then rename.
-	path := logPath(dataDir)
-	lf, err := filelock.Lock(path)
-	if err != nil {
-		return fmt.Errorf("triglog lock: %w", err)
-	}
-	defer lf.Unlock()
 
 	tmp := path + ".tmp"
 	// #nosec G304
