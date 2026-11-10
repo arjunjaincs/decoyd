@@ -25,6 +25,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 	"unsafe"
@@ -52,6 +53,13 @@ type linuxWatcher struct {
 	// wdMap maps inotify watch descriptor → deployed token.
 	// Protected by wdMu for all concurrent accesses.
 	wdMap map[int32]DeployedToken
+
+	// dirWdMap maps inotify dir watch descriptor → dir path.
+	// Protected by wdMu for all concurrent accesses.
+	dirWdMap map[int32]string
+	// dirTokens maps dir path → (basename → DeployedToken) for tokens in that dir.
+	// Protected by wdMu for all concurrent accesses.
+	dirTokens map[string]map[string]DeployedToken
 
 	running bool
 	count   int    // number of files currently watched
@@ -150,6 +158,30 @@ func (w *linuxWatcher) start() error {
 	}
 
 	w.count = len(w.wdMap)
+
+	// Add parent-directory inotify watches for all known token directories.
+	// This allows detecting files created/renamed into the directory AFTER start,
+	// without needing a Reload() call.
+	// Ref: inotify(7) - IN_CREATE fires when a file is created in the watched dir;
+	// IN_MOVED_TO fires when a file is renamed into the watched dir.
+	const dirMask = unix.IN_CREATE | unix.IN_MOVED_TO | unix.IN_DELETE | unix.IN_MOVED_FROM
+	w.dirWdMap = make(map[int32]string)
+	w.dirTokens = make(map[string]map[string]DeployedToken)
+	for _, tok := range tokens {
+		if tok.DeployedPath == "" {
+			continue
+		}
+		dir := filepath.Dir(tok.DeployedPath)
+		base := filepath.Base(tok.DeployedPath)
+		if _, exists := w.dirTokens[dir]; !exists {
+			w.dirTokens[dir] = make(map[string]DeployedToken)
+			wd, dirErr := unix.InotifyAddWatch(w.inoFD, dir, dirMask)
+			if dirErr == nil {
+				w.dirWdMap[int32(wd)] = dir // #nosec G115 -- InotifyAddWatch WD positive and in int32 range
+			}
+		}
+		w.dirTokens[dir][base] = tok
+	}
 
 	go w.eventLoop(mask)
 	return nil
@@ -313,7 +345,65 @@ func (w *linuxWatcher) eventLoop(mask uint32) {
 
 			w.wdMu.RLock()
 			tok, ok := w.wdMap[wd]
+			dirPath, isDirWd := w.dirWdMap[wd]
 			w.wdMu.RUnlock()
+
+			// Handle parent-directory events (IN_CREATE/IN_MOVED_TO/IN_DELETE/IN_MOVED_FROM).
+			if isDirWd {
+				// Extract the filename from the name bytes that follow the event header.
+				// After offset was advanced by SizeofInotifyEvent+nameLen, the name bytes
+				// are at buf[offset-nameLen : offset].
+				var name string
+				if nameLen > 0 {
+					nameBuf := buf[offset-nameLen : offset]
+					// Filename is null-padded; find the first null terminator.
+					for i, b := range nameBuf {
+						if b == 0 {
+							name = string(nameBuf[:i])
+							break
+						}
+					}
+					if name == "" {
+						name = string(nameBuf) // no null terminator found, use all bytes
+					}
+				}
+				if name != "" {
+					w.wdMu.RLock()
+					dirToks := w.dirTokens[dirPath]
+					w.wdMu.RUnlock()
+					if dirTok, hasTok := dirToks[name]; hasTok {
+						fullPath := filepath.Join(dirPath, name)
+						if evMask&(unix.IN_CREATE|unix.IN_MOVED_TO) != 0 {
+							// File appeared in directory - add a file-level watch.
+							newWD, addErr := unix.InotifyAddWatch(w.inoFD, fullPath, mask)
+							if addErr == nil {
+								w.wdMu.Lock()
+								w.wdMap[int32(newWD)] = dirTok // #nosec G115 -- WD positive
+								w.mu.Lock()
+								w.count = len(w.wdMap)
+								w.mu.Unlock()
+								w.wdMu.Unlock()
+							}
+						} else if evMask&(unix.IN_DELETE|unix.IN_MOVED_FROM) != 0 {
+							// File removed from directory - remove its file-level watch if present.
+							w.wdMu.Lock()
+							for fileWd, fileTok := range w.wdMap {
+								if fileTok.DeployedPath == fullPath {
+									_, _ = unix.InotifyRmWatch(w.inoFD, uint32(fileWd)) // #nosec G115
+									delete(w.wdMap, fileWd)
+									break
+								}
+							}
+							w.mu.Lock()
+							w.count = len(w.wdMap)
+							w.mu.Unlock()
+							w.wdMu.Unlock()
+						}
+					}
+				}
+				continue // dir-level events never dispatch alerts themselves
+			}
+
 			if !ok {
 				continue
 			}
@@ -623,6 +713,43 @@ func (w *linuxWatcher) reload() error {
 		if _, stillExists := newByPath[path]; !stillExists {
 			_, _ = unix.InotifyRmWatch(inoFD, uint32(wd)) // #nosec G115 -- wd is int32
 			delete(w.wdMap, wd)
+		}
+	}
+
+	// Sync parent-directory watches for new/removed token directories.
+	const dirMask = unix.IN_CREATE | unix.IN_MOVED_TO | unix.IN_DELETE | unix.IN_MOVED_FROM
+	newDirTokens := make(map[string]map[string]DeployedToken)
+	for _, t := range tokens {
+		if t.DeployedPath == "" {
+			continue
+		}
+		d := filepath.Dir(t.DeployedPath)
+		if newDirTokens[d] == nil {
+			newDirTokens[d] = make(map[string]DeployedToken)
+		}
+		newDirTokens[d][filepath.Base(t.DeployedPath)] = t
+	}
+	// dirWdMap/dirTokens are already locked (wdMu.Lock above); update in place.
+	dirPathToWd := make(map[string]int32, len(w.dirWdMap))
+	for dirWd, dp := range w.dirWdMap {
+		dirPathToWd[dp] = dirWd
+	}
+	// Add watches for newly required directories.
+	for d, baseToks := range newDirTokens {
+		w.dirTokens[d] = baseToks
+		if _, alreadyWatched := dirPathToWd[d]; !alreadyWatched {
+			wd, addErr := unix.InotifyAddWatch(inoFD, d, dirMask)
+			if addErr == nil {
+				w.dirWdMap[int32(wd)] = d // #nosec G115 -- WD positive
+			}
+		}
+	}
+	// Remove watches for directories no longer in the token list.
+	for dirWd, dp := range w.dirWdMap {
+		if _, stillExists := newDirTokens[dp]; !stillExists {
+			_, _ = unix.InotifyRmWatch(inoFD, uint32(dirWd)) // #nosec G115
+			delete(w.dirWdMap, dirWd)
+			delete(w.dirTokens, dp)
 		}
 	}
 
