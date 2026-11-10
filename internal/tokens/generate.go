@@ -110,6 +110,30 @@ func randB64(n int) (string, error) {
 	return base64.StdEncoding.EncodeToString(b), nil
 }
 
+// safeRandB64 returns n random bytes as base64, retrying until no banned phrase
+// appears (case-insensitive). Used for kubeconfig CA data and similar fields
+// where base64 characters can accidentally spell banned identifiers.
+func safeRandB64(n int) (string, error) {
+	for i := 0; i < 200; i++ {
+		s, err := randB64(n)
+		if err != nil {
+			return "", err
+		}
+		lo := strings.ToLower(s)
+		ok := true
+		for _, p := range bannedPhrases {
+			if strings.Contains(lo, p) {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return s, nil
+		}
+	}
+	return "", fmt.Errorf("safeRandB64: could not generate clean string after 200 retries")
+}
+
 // now returns the current UTC time.
 func now() time.Time { return time.Now().UTC() }
 
@@ -316,7 +340,7 @@ func GenerateSlackToken() (Token, error) {
 	if err != nil {
 		return Token{}, err
 	}
-	seg3, err := randStr(24, alphaNum)
+	seg3, err := safeRandStr(24, alphaNum)
 	if err != nil {
 		return Token{}, err
 	}
@@ -392,7 +416,7 @@ func GenerateKubeconfig() (Token, error) {
 	// Context name: "cluster/user" style, common in real kubectl configs.
 	contextName := clusterName + "/" + userName
 
-	caData, err := randB64(72)
+	caData, err := safeRandB64(72)
 	if err != nil {
 		return Token{}, err
 	}
@@ -463,18 +487,18 @@ func GenerateDBDump() (Token, error) {
 		return Token{}, err
 	}
 
-	dbSuffix, err := randStr(8, lowerAlpha)
+	dbSuffix, err := safeRandStr(8, lowerAlpha)
 	if err != nil {
 		return Token{}, err
 	}
 
-	// Fake bcrypt-style password hashes.
+	// Bcrypt-style password hashes (realistic structure).
 	makeHash := func() (string, error) {
-		salt, err := randStr(22, bcryptChars)
+		salt, err := safeRandStr(22, bcryptChars)
 		if err != nil {
 			return "", err
 		}
-		hash, err := randStr(31, bcryptChars)
+		hash, err := safeRandStr(31, bcryptChars)
 		if err != nil {
 			return "", err
 		}

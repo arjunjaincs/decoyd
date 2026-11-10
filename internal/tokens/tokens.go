@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -106,7 +107,8 @@ var Categories = []CategoryDef{
 
 // Generate creates a token of the given type. It returns an error if the
 // type key is unknown or if the generator itself fails (e.g. crypto/rand).
-func Generate(tokenType string) (Token, error) {
+// generateOnce dispatches a single token generation attempt.
+func generateOnce(tokenType string) (Token, error) {
 	switch tokenType {
 	case TypeAWSCredentials:
 		return GenerateAWSCredentials()
@@ -127,4 +129,35 @@ func Generate(tokenType string) (Token, error) {
 	default:
 		return Token{}, fmt.Errorf("unknown token type: %q", tokenType)
 	}
+}
+
+// Generate generates a token of the given type. It retries generation up to
+// 200 times if the token value accidentally contains a banned phrase
+// (e.g. "decoy", "fake") in its base64-encoded body or other random content.
+// This is especially important for SSH keys, whose PEM content is true crypto
+// randomness and can spell any word by coincidence (Rule 12).
+func Generate(tokenType string) (Token, error) {
+	// bannedInValue are substrings that must not appear anywhere in the
+	// generated token VALUE (case-insensitive).
+	// Identical to bannedPhrases in generate.go; duplicated here to avoid
+	// an internal package dependency.
+	bannedInValue := []string{"decoy", "canary", "decoyd", "fake", "example"}
+	for i := 0; i < 200; i++ {
+		tok, err := generateOnce(tokenType)
+		if err != nil {
+			return Token{}, err
+		}
+		lo := strings.ToLower(tok.Value)
+		ok := true
+		for _, p := range bannedInValue {
+			if strings.Contains(lo, p) {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return tok, nil
+		}
+	}
+	return Token{}, fmt.Errorf("Generate(%q): could not produce a clean token after 200 retries", tokenType)
 }
