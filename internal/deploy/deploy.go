@@ -94,6 +94,13 @@ func DeployToFile(t tokens.Token, targetDir string, opts Options) (DeployResult,
 		return deploySSHKeyPair(t, targetDir, opts)
 	}
 
+	// Warn when running as root and deploying outside system-managed directories.
+	// Deploying outside /var/lib/decoyd or /etc/decoyd as root risks clobbering
+	// system files if the caller passes a user-writable path. This is a warning,
+	// not an error — the caller may be intentionally writing to a custom path
+	// (e.g., /opt, CI runner home).
+	warnIfRootOutsideSystemDirs(targetDir)
+
 	// Resolve the absolute target path.
 	absDir, err := filepath.Abs(targetDir)
 	if err != nil {
@@ -268,4 +275,28 @@ func SanitizePath(raw string) (string, error) {
 		return filepath.Join(home, raw[1:]), nil
 	}
 	return filepath.Abs(raw)
+}
+
+// warnIfRootOutsideSystemDirs writes a warning to stderr when the process is
+// running as UID 0 and targetDir is not under a system-managed decoyd path.
+// System paths: /var/lib/decoyd, /etc/decoyd (Linux convention).
+// This is a warning, not an error. AGENTS.md Rule 12/14.
+func warnIfRootOutsideSystemDirs(targetDir string) {
+	if os.Getuid() != 0 {
+		return
+	}
+	abs, err := filepath.Abs(targetDir)
+	if err != nil {
+		return
+	}
+	systemPaths := []string{"/var/lib/decoyd", "/etc/decoyd"}
+	for _, sp := range systemPaths {
+		if strings.HasPrefix(abs, sp) {
+			return // within a system path — OK
+		}
+	}
+	fmt.Fprintf(os.Stderr,
+		"decoyd deploy: warning: running as root; deploying to %q which is outside system-managed directories"+
+			" (/var/lib/decoyd, /etc/decoyd)."+
+			" This risks deploying to a user-writable path.\n", abs)
 }

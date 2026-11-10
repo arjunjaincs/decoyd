@@ -1,4 +1,4 @@
-//go:build !linux
+//go:build !linux && !windows
 
 // deploy_notlinux.go — non-Linux deploy helpers.
 // On non-Linux platforms, O_NOFOLLOW is not available via unix.Open,
