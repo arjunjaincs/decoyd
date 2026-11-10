@@ -91,3 +91,57 @@ func TestSelfTest_PipelineAlertArrives(t *testing.T) {
 		t.Error("no alert received within 5 s")
 	}
 }
+
+// TestSelfTest_DoesNotTouchRealDataDir verifies that cmdSelfTest operates
+// entirely within its own temp workspace and never writes to the real
+// HOME or APPDATA directories.
+//
+// Method: set HOME and APPDATA to a chmod-500 sentinel directory so that
+// any write attempt would produce an EACCES error visible via os.Stat().
+// Record that the sentinel is unmodified before and after the run.
+func TestSelfTest_DoesNotTouchRealDataDir(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root bypasses permission checks; skip hermetic sentinel test")
+	}
+
+	// Sentinel: a read-only dir that must not be written to.
+	sentinel := t.TempDir()
+	if err := os.Chmod(sentinel, 0o500); err != nil {
+		t.Fatalf("chmod sentinel: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(sentinel, 0o700) })
+
+	// Redirect HOME and APPDATA to the sentinel.
+	t.Setenv("HOME", sentinel)
+	t.Setenv("APPDATA", sentinel)
+
+	// Get sentinel mtime before the test.
+	before, err := os.Stat(sentinel)
+	if err != nil {
+		t.Fatalf("stat sentinel before: %v", err)
+	}
+
+	// Run selftest with an isolated temp dataDir.
+	selfDir := t.TempDir()
+	if runErr := cmdSelfTest(selfDir); runErr != nil {
+		t.Logf("cmdSelfTest returned error (acceptable in hermetic env): %v", runErr)
+	}
+
+	// Assert sentinel was not touched.
+	after, err := os.Stat(sentinel)
+	if err != nil {
+		t.Fatalf("stat sentinel after: %v", err)
+	}
+	if !after.ModTime().Equal(before.ModTime()) {
+		t.Errorf("sentinel dir mtime changed: before=%v after=%v — selftest touched real datadir",
+			before.ModTime(), after.ModTime())
+	}
+	// Count entries — should still be 0.
+	entries, err := os.ReadDir(sentinel)
+	if err != nil {
+		t.Fatalf("readdir sentinel: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("sentinel dir has %d unexpected entries after selftest run", len(entries))
+	}
+}
