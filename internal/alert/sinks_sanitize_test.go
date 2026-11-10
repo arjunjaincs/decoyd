@@ -26,10 +26,10 @@ import (
 func hostilePayload() AlertPayload {
 	return AlertPayload{
 		TokenID:     "\x1b[31mred\x1b[0m-tokenid",         // ANSI escape
-		TokenType:   "@everyone\u202Ereverse",              // @mention + U+202E bidi
-		Path:        "<!channel> *bold* /home/user/token",  // Slack-style mention
+		TokenType:   "@everyone\u202Ereverse",             // @mention + U+202E bidi
+		Path:        "<!channel> *bold* /home/user/token", // Slack-style mention
 		TriggeredAt: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
-		Detail:      "\x1b[1mfile\x1b[0m \u202Eopened",    // ANSI + bidi
+		Detail:      "\x1b[1mfile\x1b[0m \u202Eopened", // ANSI + bidi
 	}
 }
 
