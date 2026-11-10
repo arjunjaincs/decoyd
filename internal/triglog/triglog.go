@@ -20,6 +20,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/arjunjaincs/decoyd/internal/attribution"
 	"github.com/arjunjaincs/decoyd/internal/filelock"
 )
 
@@ -69,6 +70,14 @@ type TriggerEvent struct {
 	// AlertError is a sanitized error string when Status == TriggerFailed. Empty otherwise.
 	// Guaranteed never to contain webhook URLs or bot tokens.
 	AlertError string `json:"alert_error,omitempty"`
+
+	// WatcherTier is "tier1" (fanotify) or "tier2" (inotify). Empty for pre-T5 events.
+	// Schema version: 1 (T5).
+	WatcherTier string `json:"watcher_tier,omitempty"`
+
+	// Attribution is the process and package attribution for Tier 1 events.
+	// Nil for Tier 2 events (inotify does not provide pid). Schema version: 1 (T5).
+	Attribution *attribution.Attribution `json:"attribution,omitempty"`
 }
 
 // ----------------------------------------------------------------------------
