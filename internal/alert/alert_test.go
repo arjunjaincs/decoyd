@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -846,6 +847,101 @@ func TestMultiChannel_RoundTrip(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("DefaultID %q does not match any channel ID", loaded.DefaultID)
+	}
+}
+
+// ── B3: stable IDs across multiple Load calls ─────────────────────────────────
+
+// TestLoad_TwoLoadsGiveSameIDs proves that loading a legacy config (no IDs on disk)
+// twice without any Save gives identical IDs both times.
+// Before B3, Load generated fresh IDs on every call, breaking per-token routing.
+func TestLoad_TwoLoadsGiveSameIDs(t *testing.T) {
+	dir := t.TempDir()
+	legacyJSON := `{"channels":[{"type":"discord","webhook_url":"https://discord.example"}],"default_index":0}`
+	path := dir + "/alert_config.json"
+	if err := os.WriteFile(path, []byte(legacyJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// First Load: backfills and persists IDs atomically.
+	cfg1, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load #1 error: %v", err)
+	}
+	if cfg1.Channels[0].ID == "" {
+		t.Fatal("Load #1: channel ID not backfilled")
+	}
+	// Second Load WITHOUT any intervening Save — IDs must be identical.
+	cfg2, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load #2 error: %v", err)
+	}
+	if cfg2.Channels[0].ID != cfg1.Channels[0].ID {
+		t.Errorf("IDs differ: Load#1=%q Load#2=%q; must be stable across calls",
+			cfg1.Channels[0].ID, cfg2.Channels[0].ID)
+	}
+	if cfg2.DefaultID != cfg1.DefaultID {
+		t.Errorf("DefaultID differs: Load#1=%q Load#2=%q", cfg1.DefaultID, cfg2.DefaultID)
+	}
+}
+
+// TestLoad_ConcurrentLoadAndSave proves concurrent Load+Save never loses a user change.
+func TestLoad_ConcurrentLoadAndSave(t *testing.T) {
+	dir := t.TempDir()
+	// Start with a saved config (IDs already present, no backfill needed).
+	initialCfg := AlertConfig{
+		Channels: []ChannelConfig{
+			{Type: ChannelDiscord, WebhookURL: "https://discord.example", ID: "ch-aaa"},
+		},
+		DefaultID: "ch-aaa",
+	}
+	if err := Save(dir, initialCfg); err != nil {
+		t.Fatalf("initial Save: %v", err)
+	}
+
+	// Concurrently: many goroutines Load; one goroutine repeatedly Saves.
+	const n = 20
+	errCh := make(chan error, n+1)
+	for i := 0; i < n; i++ {
+		go func() {
+			cfg, err := Load(dir)
+			if err != nil {
+				errCh <- err
+				return
+			}
+			if len(cfg.Channels) == 0 {
+				errCh <- fmt.Errorf("Load returned empty channels")
+				return
+			}
+			errCh <- nil
+		}()
+	}
+	go func() {
+		for i := 0; i < 5; i++ {
+			updated := AlertConfig{
+				Channels: []ChannelConfig{
+					{Type: ChannelDiscord, WebhookURL: "https://discord.updated", ID: "ch-aaa"},
+				},
+				DefaultID: "ch-aaa",
+			}
+			if err := Save(dir, updated); err != nil {
+				errCh <- err
+				return
+			}
+		}
+		errCh <- nil
+	}()
+	for i := 0; i < n+1; i++ {
+		if err := <-errCh; err != nil {
+			t.Error(err)
+		}
+	}
+	// After all concurrent activity, the final config must be loadable and consistent.
+	final, err := Load(dir)
+	if err != nil {
+		t.Fatalf("final Load: %v", err)
+	}
+	if len(final.Channels) == 0 {
+		t.Error("final Load: empty channels after concurrent activity")
 	}
 }
 

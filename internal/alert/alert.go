@@ -19,6 +19,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"time"
+
+	"github.com/arjunjaincs/decoyd/internal/filelock"
 )
 
 // ----------------------------------------------------------------------------
@@ -191,8 +193,9 @@ const configFileName = "alert_config.json"
 // Load reads and decodes alert_config.json from dataDir.
 // Returns an empty AlertConfig (not an error) when the file does not exist yet.
 // If any channel entry is missing an ID (legacy config), Load returns the in-memory
-// config with IDs filled but does NOT write back to disk; the caller must call
-// Save if persistence is needed. ID backfill on write is handled exclusively by Save.
+// config with IDs filled.  When any channel was missing an ID on disk,
+// Load persists the backfilled IDs atomically under a filelock so that
+// subsequent calls return the same IDs without the caller needing to Save.
 func Load(dataDir string) (AlertConfig, error) {
 	path := filepath.Join(dataDir, configFileName)
 	data, err := os.ReadFile(path) // #nosec G304 -- path is always filepath.Join(dataDir, configFileName), never user input
@@ -207,8 +210,7 @@ func Load(dataDir string) (AlertConfig, error) {
 		return AlertConfig{}, fmt.Errorf("parse alert config: %w", err)
 	}
 	// Backfill IDs for any channel entry that predates the ID field.
-	// Load is read-only: it does not write back to disk. The caller must
-	// call Save if it wants to persist the backfilled IDs.
+	needsWrite := false
 	for i := range cfg.Channels {
 		if cfg.Channels[i].ID == "" {
 			id, err := GenerateChannelID()
@@ -216,11 +218,47 @@ func Load(dataDir string) (AlertConfig, error) {
 				return AlertConfig{}, fmt.Errorf("backfill channel ID: %w", err)
 			}
 			cfg.Channels[i].ID = id
+			needsWrite = true
 		}
 	}
 	// Also backfill DefaultID if it's missing but channels exist.
 	if cfg.DefaultID == "" && len(cfg.Channels) > 0 {
 		cfg.DefaultID = cfg.Channels[0].ID
+		needsWrite = true
+	}
+	// Persist backfilled IDs atomically so the next Load call returns the same
+	// IDs without requiring the caller to call Save first.  We hold the
+	// filelock for the duration of the read-modify-write to prevent a
+	// concurrent Save from losing a user's configuration change.
+	if needsWrite {
+		if lf, lerr := filelock.Lock(path); lerr == nil {
+			defer lf.Unlock()
+			// Re-read to pick up any concurrent write that beat us to the lock.
+			if fresh, rerr := os.ReadFile(path); rerr == nil { // #nosec G304
+				var freshCfg AlertConfig
+				if jerr := json.Unmarshal(fresh, &freshCfg); jerr == nil {
+					// Merge: preserve any IDs already on disk, only fill blanks.
+					for i := range freshCfg.Channels {
+						if freshCfg.Channels[i].ID == "" && i < len(cfg.Channels) {
+							freshCfg.Channels[i].ID = cfg.Channels[i].ID
+						}
+					}
+					if freshCfg.DefaultID == "" && len(freshCfg.Channels) > 0 {
+						freshCfg.DefaultID = freshCfg.Channels[0].ID
+					}
+					cfg = freshCfg
+				}
+			}
+			// Write updated config atomically: write to .tmp then rename.
+			if out, merr := json.MarshalIndent(cfg, "", "  "); merr == nil {
+				tmpPath := path + ".tmp"
+				if werr := os.WriteFile(tmpPath, out, 0o600); werr == nil { // #nosec G306
+					_ = os.Rename(tmpPath, path)
+				}
+			}
+		}
+		// Errors from the persistence step are non-fatal: the in-memory cfg
+		// still has the backfilled IDs for this call.
 	}
 	return cfg, nil
 }
