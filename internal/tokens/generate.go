@@ -6,6 +6,8 @@ import (
 	"encoding/base64"
 	"encoding/pem"
 	"fmt"
+	"hash/crc32"
+	"math/big"
 	"strings"
 	"time"
 
@@ -25,6 +27,38 @@ const (
 	bcryptChars   = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789./"
 )
 
+// base62Dict is the alphabet for GitHub's base62 encoding of checksums.
+// Dictionary: 0-9A-Za-z, matching the reference implementation at
+// https://github.blog/security/application-security/behind-githubs-new-authentication-token-formats/
+// (split and dictionary sourced from a third-party reference implementation).
+const base62Dict = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+
+// ghpChecksum computes the 6-character base62 checksum for a GitHub PAT.
+// Algorithm: CRC32-IEEE of the 30-character entropy string, base62-encoded
+// with dictionary 0-9A-Za-z, left-padded with '0' to exactly 6 characters.
+// Test vector: entropy "zQWBuTSOoRi4A9spHcVY5ncnsDkxkJ" → checksum "0mLq17"
+// Source: https://github.blog/security/application-security/behind-githubs-new-authentication-token-formats/
+func ghpChecksum(entropy string) string {
+	crc := crc32.ChecksumIEEE([]byte(entropy))
+	n := big.NewInt(int64(crc))
+	base := big.NewInt(62)
+	rem := new(big.Int)
+	digits := make([]byte, 0, 6)
+	for n.Sign() > 0 {
+		n.DivMod(n, base, rem)
+		digits = append(digits, base62Dict[rem.Int64()])
+	}
+	// Reverse to get big-endian order.
+	for i, j := 0, len(digits)-1; i < j; i, j = i+1, j-1 {
+		digits[i], digits[j] = digits[j], digits[i]
+	}
+	// Left-pad with '0' to 6 characters.
+	for len(digits) < 6 {
+		digits = append([]byte{'0'}, digits...)
+	}
+	return string(digits)
+}
+
 // randStr returns n random chars from charset using crypto/rand.
 func randStr(n int, charset string) (string, error) {
 	b := make([]byte, n)
@@ -36,6 +70,35 @@ func randStr(n int, charset string) (string, error) {
 		b[i] = chars[int(v)%len(chars)]
 	}
 	return string(b), nil
+}
+
+// bannedPhrases are substrings that must not appear in generated random
+// credential strings, even by coincidence, to avoid tripping secret-scanning
+// tools or making decoys identifiable by textual content (Rule 12).
+var bannedPhrases = []string{"decoy", "canary", "decoyd", "fake", "example"}
+
+// safeRandStr returns n random chars from charset, retrying until the result
+// contains none of the bannedPhrases (case-insensitive). Max 100 retries.
+// This prevents accidental word collisions in credential strings.
+func safeRandStr(n int, charset string) (string, error) {
+	for i := 0; i < 100; i++ {
+		s, err := randStr(n, charset)
+		if err != nil {
+			return "", err
+		}
+		lo := strings.ToLower(s)
+		ok := true
+		for _, p := range bannedPhrases {
+			if strings.Contains(lo, p) {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return s, nil
+		}
+	}
+	return "", fmt.Errorf("safeRandStr: could not generate clean string after 100 retries")
 }
 
 // randB64 returns n random bytes encoded as standard base64.
@@ -147,23 +210,23 @@ func GenerateEnvSecrets() (Token, error) {
 		return Token{}, err
 	}
 
-	dbPass, err := randStr(24, alphaNum)
+	dbPass, err := safeRandStr(24, alphaNum)
 	if err != nil {
 		return Token{}, err
 	}
-	stripeKey, err := randStr(24, alphaNum)
+	stripeKey, err := safeRandStr(24, alphaNum)
 	if err != nil {
 		return Token{}, err
 	}
-	jwtSecret, err := randStr(64, alphaNum+"-_")
+	jwtSecret, err := safeRandStr(64, alphaNum+"-_")
 	if err != nil {
 		return Token{}, err
 	}
-	redisPass, err := randStr(20, alphaNum)
+	redisPass, err := safeRandStr(20, alphaNum)
 	if err != nil {
 		return Token{}, err
 	}
-	apiKey, err := randStr(32, alphaNum)
+	apiKey, err := safeRandStr(32, alphaNum)
 	if err != nil {
 		return Token{}, err
 	}
@@ -203,18 +266,26 @@ INTERNAL_API_KEY=%s
 // ----------------------------------------------------------------------------
 
 // GenerateGitHubPAT generates a token matching GitHub's real ghp_ format.
-// Format: ghp_ + 36 lowercase alphanumeric chars.
+//
+// Format: ghp_ + 30 base62 entropy chars + 6-char checksum = 40 chars total.
+// The checksum is CRC32-IEEE of the 30-char entropy, base62-encoded with
+// dictionary 0-9A-Za-z, left-padded with zeros to 6 characters.
+//
+// Test vector: entropy "zQWBuTSOoRi4A9spHcVY5ncnsDkxkJ" → checksum "0mLq17"
+// See: https://github.blog/security/application-security/behind-githubs-new-authentication-token-formats/
+// (checksum split and dictionary from third-party reference implementation)
 func GenerateGitHubPAT() (Token, error) {
 	id, err := NewID()
 	if err != nil {
 		return Token{}, err
 	}
 
-	body, err := randStr(36, alphaNum)
+	entropy, err := safeRandStr(30, base62Dict)
 	if err != nil {
-		return Token{}, fmt.Errorf("github pat: %w", err)
+		return Token{}, fmt.Errorf("github pat entropy: %w", err)
 	}
-	value := "ghp_" + body
+	checksum := ghpChecksum(entropy)
+	value := "ghp_" + entropy + checksum
 
 	return Token{
 		ID:        id,
@@ -265,44 +336,98 @@ func GenerateSlackToken() (Token, error) {
 // Kubeconfig
 // ----------------------------------------------------------------------------
 
-// GenerateKubeconfig generates a structurally valid kubeconfig YAML with fake
-// cluster endpoint and bearer token.
+// kubeClusterNames are plausible Kubernetes cluster names, matching real-world
+// naming patterns like those in kubectl config get-contexts output.
+var kubeClusterNames = []string{
+	"prod-eks-us-east-1",
+	"prod-eks-us-west-2",
+	"staging-eks-us-east-1",
+	"dev-eks-us-east-1",
+	"prod-gke-eu-west-1",
+	"staging-gke-eu-west-1",
+	"prod-aks-westus2",
+	"staging-aks-eastus",
+	"docker-desktop",
+	"minikube",
+	"kind-local",
+	"k3s-homelab",
+}
+
+// kubeUserNames are plausible Kubernetes user/service-account names.
+var kubeUserNames = []string{
+	"admin",
+	"deploy-bot",
+	"ci-runner",
+	"cluster-admin",
+	"devops",
+	"platform-team",
+	"sre-oncall",
+}
+
+// pickKubeName picks a random entry from a list using crypto/rand.
+func pickKubeName(list []string) (string, error) {
+	b := make([]byte, 1)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return list[int(b[0])%len(list)], nil
+}
+
+// GenerateKubeconfig generates a structurally valid kubeconfig YAML with
+// plausible cluster, user, and context names drawn from real-world patterns.
 func GenerateKubeconfig() (Token, error) {
 	id, err := NewID()
 	if err != nil {
 		return Token{}, err
 	}
 
-	clusterSuffix, err := randStr(12, lowerAlpha+digits)
+	clusterName, err := pickKubeName(kubeClusterNames)
 	if err != nil {
 		return Token{}, err
 	}
+	userName, err := pickKubeName(kubeUserNames)
+	if err != nil {
+		return Token{}, err
+	}
+	// Context name: "cluster/user" style, common in real kubectl configs.
+	contextName := clusterName + "/" + userName
+
 	caData, err := randB64(72)
 	if err != nil {
 		return Token{}, err
 	}
-	bearerToken, err := randStr(40, alphaNum+"-_")
+	bearerToken, err := safeRandStr(40, alphaNum+"-_")
 	if err != nil {
 		return Token{}, err
 	}
-	clusterName, err := randStr(8, lowerAlpha)
-	if err != nil {
-		return Token{}, err
-	}
-	userName, err := randStr(8, lowerAlpha)
-	if err != nil {
-		return Token{}, err
-	}
-	contextName, err := randStr(8, lowerAlpha)
-	if err != nil {
-		return Token{}, err
+
+	// Generate a plausible server FQDN based on the cluster name.
+	var serverHost string
+	switch {
+	case strings.HasPrefix(clusterName, "prod-eks-"):
+		region := strings.TrimPrefix(clusterName, "prod-eks-")
+		serverHost = "eks." + region + ".amazonaws.com"
+	case strings.HasPrefix(clusterName, "staging-eks-"):
+		region := strings.TrimPrefix(clusterName, "staging-eks-")
+		serverHost = "eks." + region + ".amazonaws.com"
+	case strings.HasPrefix(clusterName, "dev-eks-"):
+		region := strings.TrimPrefix(clusterName, "dev-eks-")
+		serverHost = "eks." + region + ".amazonaws.com"
+	case strings.HasPrefix(clusterName, "prod-gke-"):
+		serverHost = "container.googleapis.com"
+	case strings.HasPrefix(clusterName, "staging-gke-"):
+		serverHost = "container.googleapis.com"
+	case strings.HasPrefix(clusterName, "prod-aks-") || strings.HasPrefix(clusterName, "staging-aks-"):
+		serverHost = clusterName + ".hcp.eastus.azmk8s.io"
+	default:
+		serverHost = "127.0.0.1:6443"
 	}
 
 	value := fmt.Sprintf(`apiVersion: v1
 kind: Config
 clusters:
 - cluster:
-    server: https://k8s-%s.internal:6443
+    server: https://%s
     certificate-authority-data: %s
   name: %s
 contexts:
@@ -316,7 +441,7 @@ users:
 - name: %s
   user:
     token: %s
-`, clusterSuffix, caData, clusterName, clusterName, userName, contextName, contextName, userName, bearerToken)
+`, serverHost, caData, clusterName, clusterName, userName, contextName, contextName, userName, bearerToken)
 
 	return Token{
 		ID:        id,
@@ -369,9 +494,9 @@ func GenerateDBDump() (Token, error) {
 		return Token{}, err
 	}
 
-	apiKey1, _ := randStr(32, alphaNum)
-	apiKey2, _ := randStr(32, alphaNum)
-	apiKey3, _ := randStr(32, alphaNum)
+	apiKey1, _ := safeRandStr(32, alphaNum)
+	apiKey2, _ := safeRandStr(32, alphaNum)
+	apiKey3, _ := safeRandStr(32, alphaNum)
 
 	ts := now().Format("2006-01-02 15:04:05")
 
