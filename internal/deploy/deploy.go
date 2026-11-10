@@ -10,9 +10,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/arjunjaincs/decoyd/internal/tokens"
 )
@@ -126,6 +128,7 @@ func DeployToFile(t tokens.Token, targetDir string, opts Options) (DeployResult,
 	if err := writeFile(dest, t.Value, perm); err != nil {
 		return DeployResult{}, err
 	}
+	backdateFiles(dest)
 
 	return res, nil
 }
@@ -183,6 +186,7 @@ func deploySSHKeyPair(t tokens.Token, targetDir string, opts Options) (DeployRes
 		_ = os.Remove(privDest)
 		return DeployResult{}, err
 	}
+	backdateFiles(privDest, pubDest)
 
 	return res, nil
 }
@@ -211,6 +215,18 @@ func writeFile(dest, content string, perm os.FileMode) error {
 		_ = err
 	}
 	return nil
+}
+
+// backdateFiles sets the atime and mtime of each path to a random time
+// 30-400 days before now.  This ensures deployed decoy files do not have a
+// suspicious "just-created" timestamp that might alert a careful attacker.
+// Errors are silently ignored; backdating is best-effort.
+func backdateFiles(paths ...string) {
+	daysBack := 30 + rand.Intn(371) // uniform in [30, 400]
+	t := time.Now().AddDate(0, 0, -daysBack)
+	for _, p := range paths {
+		_ = os.Chtimes(p, t, t)
+	}
 }
 
 // PresetDirs returns platform-appropriate preset destination directories.
