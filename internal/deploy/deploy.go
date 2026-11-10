@@ -222,7 +222,7 @@ func writeFile(dest, content string, perm os.FileMode) error {
 // suspicious "just-created" timestamp that might alert a careful attacker.
 // Errors are silently ignored; backdating is best-effort.
 func backdateFiles(paths ...string) {
-	daysBack := 30 + rand.Intn(371) // uniform in [30, 400]
+	daysBack := 30 + rand.Intn(371) // #nosec G404 -- mtime jitter is not security-sensitive; math/rand is sufficient
 	t := time.Now().AddDate(0, 0, -daysBack)
 	for _, p := range paths {
 		_ = os.Chtimes(p, t, t)

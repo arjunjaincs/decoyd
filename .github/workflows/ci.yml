@@ -190,10 +190,7 @@ jobs:
         run: gosec -severity medium -confidence medium -exclude G107 ./...
 
       - name: Install staticcheck
-        # @latest is acceptable here: staticcheck is a pure analysis tool with no
-        # effect on the built binary; it cannot introduce runtime vulnerabilities.
-        # We prefer latest to always catch new SA checks.
-        run: go install honnef.co/go/tools/cmd/staticcheck@latest
+        run: go install honnef.co/go/tools/cmd/staticcheck@2025.1.1
 
       - name: Run staticcheck
         run: staticcheck ./...
