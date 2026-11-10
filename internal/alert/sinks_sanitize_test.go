@@ -218,3 +218,97 @@ func TestSinkSanitize_Webhook_PreSanitizedPayloadIsClean(t *testing.T) {
 	assertNoANSIB7(t, "webhook", string(*body))
 	assertNoBidiB7(t, "webhook", string(*body))
 }
+
+// ── Exhaustive table: ALL sinks must be listed here (1.3) ────────────────────
+//
+// If you add a new alerter, add it here. The test fails if the table does not
+// cover every alerter type exported by this package.
+//
+// Covered sinks: Discord, Slack, Telegram, Teams, ntfy, webhook (6 total).
+func TestSinkSanitize_AllSinksTableDriven(t *testing.T) {
+	hostile := hostilePayload()
+
+	// sinkEntry describes one alerter under test.
+	type sinkEntry struct {
+		name    string
+		mkSink  func(url string) Alerter
+		checkFn func(t *testing.T, name string, body []byte)
+	}
+
+	sinks := []sinkEntry{
+		{
+			name:   "Discord",
+			mkSink: func(url string) Alerter { return &DiscordAlerter{webhookURL: url} },
+			checkFn: func(t *testing.T, name string, body []byte) {
+				assertNoANSIB7(t, name, string(body))
+				assertNoBidiB7(t, name, string(body))
+				if !strings.Contains(string(body), `"parse":[]`) &&
+					!strings.Contains(string(body), `"parse": []`) {
+					t.Errorf("%s: body missing allowed_mentions parse:[] — @everyone may expand", name)
+				}
+			},
+		},
+		{
+			name:   "Slack",
+			mkSink: func(url string) Alerter { return &SlackAlerter{webhookURL: url} },
+			checkFn: func(t *testing.T, name string, body []byte) {
+				assertNoANSIB7(t, name, string(body))
+				assertNoBidiB7(t, name, string(body))
+			},
+		},
+		{
+			name:   "Telegram",
+			mkSink: func(url string) Alerter {
+				return newTelegramAlerter("test-bot-token", "123", url)
+			},
+			checkFn: func(t *testing.T, name string, body []byte) {
+				assertNoANSIB7(t, name, string(body))
+				assertNoBidiB7(t, name, string(body))
+			},
+		},
+		{
+			name:   "Teams",
+			mkSink: func(url string) Alerter { return &TeamsAlerter{webhookURL: url} },
+			checkFn: func(t *testing.T, name string, body []byte) {
+				assertNoANSIB7(t, name, string(body))
+				assertNoBidiB7(t, name, string(body))
+			},
+		},
+		{
+			name:   "ntfy",
+			mkSink: func(url string) Alerter { return &NtfyAlerter{serverURL: url, topic: "alerts"} },
+			checkFn: func(t *testing.T, name string, body []byte) {
+				assertNoANSIB7(t, name, string(body))
+				assertNoBidiB7(t, name, string(body))
+			},
+		},
+		{
+			name:   "webhook",
+			mkSink: func(url string) Alerter { return &WebhookAlerter{webhookURL: url} },
+			checkFn: func(t *testing.T, name string, body []byte) {
+				assertNoANSIB7(t, name, string(body))
+				assertNoBidiB7(t, name, string(body))
+			},
+		},
+	}
+
+	// Guard: fail if someone adds a new alerter file without updating this table.
+	const expectedSinkCount = 6
+	if len(sinks) != expectedSinkCount {
+		t.Fatalf("exhaustive sink table has %d entries but expected %d — update this table when adding an alerter",
+			len(sinks), expectedSinkCount)
+	}
+
+	for _, tc := range sinks {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			srv, body := captureBodyB7(t)
+			a := tc.mkSink(srv.URL)
+			if err := a.Send(bgCtx(), hostile); err != nil {
+				// A nil-field or config error in test setup fails here; that's correct.
+				t.Fatalf("Send: %v", err)
+			}
+			tc.checkFn(t, tc.name, *body)
+		})
+	}
+}

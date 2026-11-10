@@ -6,6 +6,8 @@ package alert
 import (
 	"bytes"
 	"context"
+
+	"github.com/arjunjaincs/decoyd/internal/sanitize"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -35,6 +37,25 @@ type AlertPayload struct {
 	Path        string    `json:"path"`
 	TriggeredAt time.Time `json:"triggered_at"`
 	Detail      string    `json:"detail"`
+}
+
+// Sanitized returns a copy of p with every string field run through
+// sanitize.Sanitize at an appropriate length cap. Call this at the top of
+// every alerter's Send implementation so that raw paths, process names, and
+// any other external strings cannot carry ANSI escapes, bidi overrides, or
+// C0/C1 control characters into the wire format.
+//
+// Per-sink escaping (Discord allowed_mentions, Slack plain_text, etc.) is
+// still the alerter's responsibility; Sanitized() only strips dangerous
+// unicode and control characters.
+func (p AlertPayload) Sanitized() AlertPayload {
+	return AlertPayload{
+		TokenID:     sanitize.Sanitize(p.TokenID, 64),
+		TokenType:   sanitize.Sanitize(p.TokenType, 64),
+		Path:        sanitize.Sanitize(p.Path, 512),
+		TriggeredAt: p.TriggeredAt,
+		Detail:      sanitize.Sanitize(p.Detail, 512),
+	}
 }
 
 // Alerter is the pluggable notification interface.
