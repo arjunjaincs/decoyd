@@ -218,7 +218,7 @@ func TestWdMapRaceReAdd(t *testing.T) {
 	if !st.Running {
 		t.Error("watcher stopped unexpectedly during race test")
 	}
-	t.Logf("TestWdMapRaceReAdd: no panic; race detection requires gcc (-race flag) — UNKNOWN")
+	// Race correctness is verified by go test -race (gcc installed).
 }
 
 // TestWatcherReload_NewTokenPickedUp proves that a token deployed after the

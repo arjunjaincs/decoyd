@@ -340,9 +340,24 @@ func (w *linuxWatcher) eventLoop(mask uint32) {
 				w.mu.Unlock()
 				w.wdMu.Unlock()
 				// Attempt to re-add the watch (e.g. after atomic file replace).
-				go func(t DeployedToken) {
-					time.Sleep(100 * time.Millisecond)
-					newWD, err := unix.InotifyAddWatch(w.inoFD, t.DeployedPath, mask)
+				// Snapshot inoFD under mu to avoid a race with closeFDs().
+				w.mu.Lock()
+				snapFD := w.inoFD
+				w.mu.Unlock()
+				go func(t DeployedToken, fd int) {
+					select {
+					case <-w.stopCh:
+						return // watcher shutting down; don't use fd
+					case <-time.After(100 * time.Millisecond):
+					}
+					// Re-check that the watcher is still running and fd unchanged.
+					w.mu.Lock()
+					if !w.running || w.inoFD != fd || fd < 0 {
+						w.mu.Unlock()
+						return
+					}
+					w.mu.Unlock()
+					newWD, err := unix.InotifyAddWatch(fd, t.DeployedPath, mask)
 					if err == nil {
 						w.wdMu.Lock()
 						w.wdMap[int32(newWD)] = t // #nosec G115 -- InotifyAddWatch returns int; Linux WDs are positive and bounded within int32 range
@@ -351,7 +366,7 @@ func (w *linuxWatcher) eventLoop(mask uint32) {
 						w.mu.Unlock()
 						w.wdMu.Unlock()
 					}
-				}(tok)
+				}(tok, snapFD)
 			}
 		}
 	}
