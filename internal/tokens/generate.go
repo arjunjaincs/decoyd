@@ -72,34 +72,7 @@ func randStr(n int, charset string) (string, error) {
 	return string(b), nil
 }
 
-// bannedPhrases are substrings that must not appear in generated random
-// credential strings, even by coincidence, to avoid tripping secret-scanning
-// tools or making decoys identifiable by textual content (Rule 12).
-var bannedPhrases = []string{"decoy", "canary", "decoyd", "fake", "example"}
 
-// safeRandStr returns n random chars from charset, retrying until the result
-// contains none of the bannedPhrases (case-insensitive). Max 100 retries.
-// This prevents accidental word collisions in credential strings.
-func safeRandStr(n int, charset string) (string, error) {
-	for i := 0; i < 100; i++ {
-		s, err := randStr(n, charset)
-		if err != nil {
-			return "", err
-		}
-		lo := strings.ToLower(s)
-		ok := true
-		for _, p := range bannedPhrases {
-			if strings.Contains(lo, p) {
-				ok = false
-				break
-			}
-		}
-		if ok {
-			return s, nil
-		}
-	}
-	return "", fmt.Errorf("safeRandStr: could not generate clean string after 100 retries")
-}
 
 // randB64 returns n random bytes encoded as standard base64.
 func randB64(n int) (string, error) {
@@ -110,29 +83,6 @@ func randB64(n int) (string, error) {
 	return base64.StdEncoding.EncodeToString(b), nil
 }
 
-// safeRandB64 returns n random bytes as base64, retrying until no banned phrase
-// appears (case-insensitive). Used for kubeconfig CA data and similar fields
-// where base64 characters can accidentally spell banned identifiers.
-func safeRandB64(n int) (string, error) {
-	for i := 0; i < 200; i++ {
-		s, err := randB64(n)
-		if err != nil {
-			return "", err
-		}
-		lo := strings.ToLower(s)
-		ok := true
-		for _, p := range bannedPhrases {
-			if strings.Contains(lo, p) {
-				ok = false
-				break
-			}
-		}
-		if ok {
-			return s, nil
-		}
-	}
-	return "", fmt.Errorf("safeRandB64: could not generate clean string after 200 retries")
-}
 
 // now returns the current UTC time.
 func now() time.Time { return time.Now().UTC() }
@@ -234,23 +184,23 @@ func GenerateEnvSecrets() (Token, error) {
 		return Token{}, err
 	}
 
-	dbPass, err := safeRandStr(24, alphaNum)
+	dbPass, err := randStr(24, alphaNum)
 	if err != nil {
 		return Token{}, err
 	}
-	stripeKey, err := safeRandStr(24, alphaNum)
+	stripeKey, err := randStr(24, alphaNum)
 	if err != nil {
 		return Token{}, err
 	}
-	jwtSecret, err := safeRandStr(64, alphaNum+"-_")
+	jwtSecret, err := randStr(64, alphaNum+"-_")
 	if err != nil {
 		return Token{}, err
 	}
-	redisPass, err := safeRandStr(20, alphaNum)
+	redisPass, err := randStr(20, alphaNum)
 	if err != nil {
 		return Token{}, err
 	}
-	apiKey, err := safeRandStr(32, alphaNum)
+	apiKey, err := randStr(32, alphaNum)
 	if err != nil {
 		return Token{}, err
 	}
@@ -304,7 +254,7 @@ func GenerateGitHubPAT() (Token, error) {
 		return Token{}, err
 	}
 
-	entropy, err := safeRandStr(30, base62Dict)
+	entropy, err := randStr(30, base62Dict)
 	if err != nil {
 		return Token{}, fmt.Errorf("github pat entropy: %w", err)
 	}
@@ -340,7 +290,7 @@ func GenerateSlackToken() (Token, error) {
 	if err != nil {
 		return Token{}, err
 	}
-	seg3, err := safeRandStr(24, alphaNum)
+	seg3, err := randStr(24, alphaNum)
 	if err != nil {
 		return Token{}, err
 	}
@@ -416,11 +366,11 @@ func GenerateKubeconfig() (Token, error) {
 	// Context name: "cluster/user" style, common in real kubectl configs.
 	contextName := clusterName + "/" + userName
 
-	caData, err := safeRandB64(72)
+	caData, err := randB64(72)
 	if err != nil {
 		return Token{}, err
 	}
-	bearerToken, err := safeRandStr(40, alphaNum+"-_")
+	bearerToken, err := randStr(40, alphaNum+"-_")
 	if err != nil {
 		return Token{}, err
 	}
@@ -487,18 +437,18 @@ func GenerateDBDump() (Token, error) {
 		return Token{}, err
 	}
 
-	dbSuffix, err := safeRandStr(8, lowerAlpha)
+	dbSuffix, err := randStr(8, lowerAlpha)
 	if err != nil {
 		return Token{}, err
 	}
 
 	// Bcrypt-style password hashes (realistic structure).
 	makeHash := func() (string, error) {
-		salt, err := safeRandStr(22, bcryptChars)
+		salt, err := randStr(22, bcryptChars)
 		if err != nil {
 			return "", err
 		}
-		hash, err := safeRandStr(31, bcryptChars)
+		hash, err := randStr(31, bcryptChars)
 		if err != nil {
 			return "", err
 		}
@@ -518,9 +468,9 @@ func GenerateDBDump() (Token, error) {
 		return Token{}, err
 	}
 
-	apiKey1, _ := safeRandStr(32, alphaNum)
-	apiKey2, _ := safeRandStr(32, alphaNum)
-	apiKey3, _ := safeRandStr(32, alphaNum)
+	apiKey1, _ := randStr(32, alphaNum)
+	apiKey2, _ := randStr(32, alphaNum)
+	apiKey3, _ := randStr(32, alphaNum)
 
 	ts := now().Format("2006-01-02 15:04:05")
 

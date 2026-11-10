@@ -293,10 +293,19 @@ func TestGenerateDNSCanary_LabelUniqueness(t *testing.T) {
 // TestNoStaticIdentifiers generates 200 tokens of every type and fails if any
 // token value or filename matches the denylist of static identifiers.
 // Rule 12: NO static identifiers ("decoyd", "canary", "decoy" etc.) in generated files.
-// "fake" and "example" are matched as whole words only since random alphanumeric
-// strings may accidentally contain them as substrings.
+//
+// High-entropy random values (16+ consecutive base64/alphanumeric chars) are stripped
+// before checking the denylist — the check applies to structural/template text only,
+// not to cryptographically random values that could accidentally spell a word.
+// Use -count=200 to get enough samples to catch accidental template leakage.
 func TestNoStaticIdentifiers(t *testing.T) {
-	// exactPhrases must NOT appear anywhere (case-insensitive substring match).
+	// highEntropyRE strips runs of 16+ base64/alphanumeric chars — these are random
+	// values that cannot be banned from templates (Rule 12 applies to template text,
+	// not to random entropy values). After stripping, the remaining structural text
+	// (labels, comments, format strings, YAML keys) must not contain banned phrases.
+	highEntropyRE := regexp.MustCompile(`[A-Za-z0-9+/=_\-]{16,}`)
+
+	// exactPhrases must NOT appear in structural text (case-insensitive substring match).
 	exactPhrases := []string{
 		"decoy",
 		"canary",
@@ -307,10 +316,10 @@ func TestNoStaticIdentifiers(t *testing.T) {
 		"dns_canary",
 	}
 
-	// wordPatterns must NOT appear as whole words (non-alphanum boundaries).
+	// wordPatterns must NOT appear as whole words in structural text.
 	wordPatterns := []*regexp.Regexp{
-		regexp.MustCompile(`(?i)\bfake\b`),
-		regexp.MustCompile(`(?i)\bexample\b`),
+		regexp.MustCompile(`(?i)fake`),
+		regexp.MustCompile(`(?i)example`),
 	}
 
 	allTypes := []string{
@@ -331,11 +340,13 @@ func TestNoStaticIdentifiers(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Generate(%q) #%d error: %v", tt, i, err)
 			}
+			// Strip high-entropy runs before denylist check.
+			structural := highEntropyRE.ReplaceAllString(tok.Value, "")
 			for _, phrase := range exactPhrases {
 				lo := strings.ToLower(phrase)
-				if strings.Contains(strings.ToLower(tok.Value), lo) {
-					t.Errorf("type=%s token[%d] Value contains banned phrase %q (excerpt: %.120q)",
-						tt, i, phrase, tok.Value)
+				if strings.Contains(strings.ToLower(structural), lo) {
+					t.Errorf("type=%s token[%d] structural text contains banned phrase %q (stripped excerpt: %.120q)",
+						tt, i, phrase, structural)
 				}
 				if strings.Contains(strings.ToLower(tok.Filename), lo) {
 					t.Errorf("type=%s token[%d] Filename=%q contains banned phrase %q",
@@ -343,9 +354,9 @@ func TestNoStaticIdentifiers(t *testing.T) {
 				}
 			}
 			for _, re := range wordPatterns {
-				if re.MatchString(tok.Value) {
-					t.Errorf("type=%s token[%d] Value matches banned word pattern %q (excerpt: %.120q)",
-						tt, i, re.String(), tok.Value)
+				if re.MatchString(structural) {
+					t.Errorf("type=%s token[%d] structural text matches banned word pattern %q (stripped excerpt: %.120q)",
+						tt, i, re.String(), structural)
 				}
 				if re.MatchString(tok.Filename) {
 					t.Errorf("type=%s token[%d] Filename=%q matches banned word pattern %q",

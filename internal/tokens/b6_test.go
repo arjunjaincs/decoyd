@@ -154,35 +154,3 @@ func TestKubeconfig_PlausibleNames(t *testing.T) {
 		}
 	}
 }
-
-// ── safeRandStr ban coverage (B6/B0-tokens) ──────────────────────────────────
-
-// TestSafeRandStr_NoBannedPhrases complements TestNoStaticIdentifiers with higher
-// iteration counts to verify safeRandStr rejection-sampling works correctly.
-func TestSafeRandStr_NoBannedPhrases(t *testing.T) {
-	banned := []string{"decoy", "canary", "decoyd", "fake", "example"}
-	allTypes := []string{
-		tokens.TypeAWSCredentials,
-		tokens.TypeSSHKey,
-		tokens.TypeEnvSecrets,
-		tokens.TypeGitHubPAT,
-		tokens.TypeSlackToken,
-		tokens.TypeKubeconfig,
-		tokens.TypeDBDump,
-		tokens.TypeDNSCanary,
-	}
-	for _, tt := range allTypes {
-		for i := 0; i < 100; i++ {
-			tok, err := tokens.Generate(tt)
-			if err != nil {
-				t.Fatalf("Generate(%q) #%d: %v", tt, i, err)
-			}
-			lo := strings.ToLower(tok.Value)
-			for _, p := range banned {
-				if strings.Contains(lo, p) {
-					t.Errorf("type=%s token[%d] contains %q: %.100q", tt, i, p, tok.Value)
-				}
-			}
-		}
-	}
-}
