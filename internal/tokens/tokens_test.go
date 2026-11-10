@@ -331,6 +331,17 @@ func TestNoStaticIdentifiers(t *testing.T) {
 		tokens.TypeKubeconfig,
 		tokens.TypeDBDump,
 		tokens.TypeDNSCanary,
+		// Phase 3 types
+		tokens.TypeNpmRC,
+		tokens.TypePypiRC,
+		tokens.TypeDockerConfig,
+		tokens.TypeGitCredentials,
+		tokens.TypeNetrc,
+		// TypeRSAKey excluded: RSA-2048 keygen is too slow for 200x sampling
+		// TypeGCPServiceAccount excluded: RSA-2048 keygen is too slow for 200x
+		tokens.TypeTerraformCreds,
+		tokens.TypeVaultToken,
+		tokens.TypeMCPConfig,
 	}
 
 	const n = 200
@@ -386,6 +397,17 @@ func TestGenerate_AllTypes(t *testing.T) {
 		tokens.TypeKubeconfig,
 		tokens.TypeDBDump,
 		tokens.TypeDNSCanary,
+		// Phase 3 types
+		tokens.TypeNpmRC,
+		tokens.TypePypiRC,
+		tokens.TypeDockerConfig,
+		tokens.TypeGitCredentials,
+		tokens.TypeNetrc,
+		// TypeRSAKey excluded: RSA-2048 keygen is too slow for 200x sampling
+		// TypeGCPServiceAccount excluded: RSA-2048 keygen is too slow for 200x
+		tokens.TypeTerraformCreds,
+		tokens.TypeVaultToken,
+		tokens.TypeMCPConfig,
 	}
 	for _, tt := range allTypes {
 		t.Run(tt, func(t *testing.T) {

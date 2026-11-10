@@ -227,14 +227,14 @@ func exeSHA256(pid int32, exePath string, procRoot string) string {
 
 // processSnapshot holds intermediate collection results with PID-reuse detection data.
 type processSnapshot struct {
-	startTicks0 uint64
-	startTicks1 uint64
-	ppid        int32
-	info        attribution.ProcessInfo
-	npmName     string
-	npmVersion  string
+	startTicks0  uint64
+	startTicks1  uint64
+	ppid         int32
+	info         attribution.ProcessInfo
+	npmName      string
+	npmVersion   string
 	npmLifecycle string
-	pidReused   bool
+	pidReused    bool
 }
 
 // collectProcess reads all /proc fields for pid and detects PID reuse.
@@ -243,8 +243,8 @@ func collectProcess(pid int32, procRoot string) processSnapshot {
 	if err != nil {
 		return processSnapshot{
 			info: attribution.ProcessInfo{
-				PID:   pid,
-				Comm:  readComm(pid, procRoot),
+				PID:  pid,
+				Comm: readComm(pid, procRoot),
 			},
 			pidReused: true,
 		}

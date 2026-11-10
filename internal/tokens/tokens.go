@@ -23,6 +23,17 @@ const (
 	TypeKubeconfig     = "kubeconfig"
 	TypeDBDump         = "db_dump"
 	TypeDNSCanary      = "dns_canary"
+	// Phase 3 token types
+	TypeNpmRC             = "npmrc"
+	TypePypiRC            = "pypirc"
+	TypeDockerConfig      = "docker_config"
+	TypeGitCredentials    = "git_credentials"
+	TypeNetrc             = "netrc"
+	TypeRSAKey            = "rsa_key"
+	TypeGCPServiceAccount = "gcp_service_account"
+	TypeTerraformCreds    = "terraform_creds"
+	TypeVaultToken        = "vault_token"
+	TypeMCPConfig         = "mcp_config"
 )
 
 // ----------------------------------------------------------------------------
@@ -99,6 +110,21 @@ var Categories = []CategoryDef{
 			{TypeDBDump, "Database dump", "backup.sql with real-looking schema, connection header, fake rows"},
 		},
 	},
+	{
+		Name: "Credentials (Phase 3)",
+		Types: []TypeDef{
+			{TypeNpmRC, ".npmrc auth token", "npm registry auth token (npm_... format)"},
+			{TypePypiRC, ".pypirc token", "PyPI API token (pypi-... format)"},
+			{TypeDockerConfig, "Docker config.json", "Docker registry auth config"},
+			{TypeGitCredentials, ".git-credentials", "Git credential store with GitHub token"},
+			{TypeNetrc, ".netrc", "netrc credential file for API hosts"},
+			{TypeRSAKey, "RSA-2048 private key", "real RSA-2048 key in PKCS#1 PEM, never registered"},
+			{TypeGCPServiceAccount, "GCP service account JSON", "realistic GCP SA JSON with PKCS#8 key"},
+			{TypeTerraformCreds, "Terraform credentials.tfrc.json", "Terraform Cloud API token"},
+			{TypeVaultToken, "Vault token", "HashiCorp Vault service token (s.xxx format)"},
+			{TypeMCPConfig, "MCP config (mcp.json)", "Cursor MCP config with fake GitHub PAT"},
+		},
+	},
 }
 
 // ----------------------------------------------------------------------------
@@ -126,6 +152,26 @@ func generateOnce(tokenType string) (Token, error) {
 		return GenerateDBDump()
 	case TypeDNSCanary:
 		return GenerateDNSCanary()
+	case TypeNpmRC:
+		return GenerateNpmRC()
+	case TypePypiRC:
+		return GeneratePypiRC()
+	case TypeDockerConfig:
+		return GenerateDockerConfig()
+	case TypeGitCredentials:
+		return GenerateGitCredentials()
+	case TypeNetrc:
+		return GenerateNetrc()
+	case TypeRSAKey:
+		return GenerateRSAKey()
+	case TypeGCPServiceAccount:
+		return GenerateGCPServiceAccount()
+	case TypeTerraformCreds:
+		return GenerateTerraformCreds()
+	case TypeVaultToken:
+		return GenerateVaultToken()
+	case TypeMCPConfig:
+		return GenerateMCPConfig()
 	default:
 		return Token{}, fmt.Errorf("unknown token type: %q", tokenType)
 	}

@@ -41,13 +41,13 @@ func (c Confidence) String() string {
 type ProcessInfo struct {
 	PID        int32  `json:"pid"`
 	PPID       int32  `json:"ppid"`
-	Comm       string `json:"comm"`                   // /proc/<pid>/comm, 15-byte max
-	Exe        string `json:"exe"`                    // readlink /proc/<pid>/exe
+	Comm       string `json:"comm"`                  // /proc/<pid>/comm, 15-byte max
+	Exe        string `json:"exe"`                   // readlink /proc/<pid>/exe
 	ExeDeleted bool   `json:"exe_deleted,omitempty"` // true when exe had " (deleted)" suffix
-	Cmdline    string `json:"cmdline"`                // NUL→space, capped 4096 chars
-	Cwd        string `json:"cwd"`                    // readlink /proc/<pid>/cwd
-	UID        uint32 `json:"uid"`                    // from /proc/<pid>/status
-	StartTicks uint64 `json:"start_ticks"`            // field 22 of /proc/<pid>/stat
+	Cmdline    string `json:"cmdline"`               // NUL→space, capped 4096 chars
+	Cwd        string `json:"cwd"`                   // readlink /proc/<pid>/cwd
+	UID        uint32 `json:"uid"`                   // from /proc/<pid>/status
+	StartTicks uint64 `json:"start_ticks"`           // field 22 of /proc/<pid>/stat
 	ExeSHA256  string `json:"exe_sha256,omitempty"`  // hex; empty if >100 MB or deleted
 }
 

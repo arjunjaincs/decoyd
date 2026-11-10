@@ -44,15 +44,15 @@ func TestPackageConfidence_String(t *testing.T) {
 func TestAttribution_JSONRoundtrip(t *testing.T) {
 	a := attribution.Attribution{
 		Accessor: attribution.ProcessInfo{
-			PID:       1234,
-			PPID:      1000,
-			Comm:      "node",
-			Exe:       "/usr/bin/node",
-			Cmdline:   "node install.js",
-			Cwd:       "/home/user/app",
-			UID:       1000,
+			PID:        1234,
+			PPID:       1000,
+			Comm:       "node",
+			Exe:        "/usr/bin/node",
+			Cmdline:    "node install.js",
+			Cwd:        "/home/user/app",
+			UID:        1000,
 			StartTicks: 12345678,
-			ExeSHA256: "abc123",
+			ExeSHA256:  "abc123",
 		},
 		Ancestors: attribution.AncestorChain{
 			{PID: 1000, PPID: 999, Comm: "npm", Exe: "/usr/bin/npm"},
