@@ -102,7 +102,7 @@ Tasks and files:
 | T4 | `internal/attribution/attribution.go` | ProcessInfo, Attribution types |
 | T5 | `internal/triglog/triglog.go` (amend) | Schema v1: Attribution + WatcherTier |
 | T5 | `cmd/decoyd/cmd_events.go` | `decoyd events` subcommand |
-| T6 | `cmd/decoyd/cmd_install_linux.go` (amend) | `--system` install flag |
+| T6 | `cmd/decoyd/cmd_install_system_linux.go` | `--system`, `sync`, `uninstall --system` |
 
 ### Key constraints
 

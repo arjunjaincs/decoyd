@@ -2,34 +2,34 @@
 
 > **Schema version**: 1 (introduced in T5 / `batch/tier1-v1`)
 >
-> Old events (schema v0, without `watcher_tier` and `attribution`) load
-> correctly from `triggers.jsonl`; both fields are `omitempty`.
+> Old events (pre-T5, without `watcher_tier` and `attribution`) load
+> correctly from `triggers.jsonl`; both fields use `omitempty`.
 
 ## Overview
 
-Decoyd appends JSON records to `<data-dir>/triggers.jsonl` whenever a deployed
-canary token file is accessed. The `decoyd events` command reads and formats
-these records.
+Decoyd appends JSON lines to `<data-dir>/triggers.jsonl` whenever a watched
+canary token file is accessed. The `decoyd events` command reads user events
+and merges `/var/lib/decoyd/triggers.jsonl` when running without `--data-dir`.
 
 ## Record Format
 
-Each line is a JSON object conforming to the following schema:
+Each line is a JSON object matching `triglog.TriggerEvent` (`internal/triglog/triglog.go`):
 
 ```jsonc
 {
-  // Required fields (present in all schema versions)
-  "id":           "8f4a2c...",          // random 8-byte hex event ID (deduplication)
-  "token_id":     "tok-abc123",         // ID of the token that triggered
-  "token_type":   "aws_credentials",   // token type (e.g. "aws_credentials", "github_pat")
+  // Required fields (present in all records)
+  "id":           "8f4a2c1e9b3d7a05",             // random 8-byte hex event ID (deduplication)
+  "token_id":     "tok-abc123",                   // ID of the token that triggered
+  "token_type":   "aws_credentials",              // token type (e.g. "aws_credentials", "npmrc")
   "path":         "/home/user/.aws/credentials",  // absolute path of the accessed file
-  "triggered_at": "2026-11-10T10:00:00Z",          // UTC RFC3339 timestamp
-  "event_type":   "access",            // inotify/fanotify event: "access" | "write" | "rename" | "delete"
-  "status":       "sent",             // see Status Values below
+  "triggered_at": "2026-11-10T10:00:00Z",         // UTC RFC3339 timestamp
+  "event_type":   "access",                       // event type: "access" | "write" | "rename" | "delete"
+  "status":       "sent",                         // see Status Values below
 
-  // Optional fields added in schema v1 (omitted for pre-v1 events)
-  "alert_error":   "...",              // present when status == "failed"; sanitized error string
-  "watcher_tier":  "tier1",           // "tier1" (fanotify) or "tier2" (inotify); empty = tier2
-  "attribution":   { ... }            // process/package attribution; tier1 only (see below)
+  // Optional fields added in schema v1 (omitted when unset)
+  "alert_error":  "...",                          // present when status == "failed"; sanitized error string
+  "watcher_tier": "tier1",                        // "tier1" (fanotify) or "tier2" (inotify); empty = pre-T5
+  "attribution":  { ... }                         // process/npm attribution; tier1 only (see below)
 }
 ```
 
@@ -45,34 +45,33 @@ Each line is a JSON object conforming to the following schema:
 
 > [!NOTE]
 > `triggers.jsonl` deduplicates by `id` on read — the latest record per ID
-> wins. A `pending` record followed by a `sent` record for the same ID will
-> show as `sent` in `decoyd events` output.
+> wins. A `pending` record followed by a `sent` record for the same ID shows
+> as `sent` in `decoyd events` output.
 
 ## Attribution Object (Tier 1 only)
 
 Present only when `watcher_tier == "tier1"` (fanotify-based detection).
 All string fields are pre-sanitized (ANSI, bidi, C0/C1 stripped).
-**Token values are never stored here (O8).**
+**Token file values are never stored here (O8).**
 
 ```jsonc
 {
   "accessor": {              // the process that opened / accessed the token file
     "pid":         1234,
     "ppid":        1000,
-    "comm":        "cat",           // /proc/<pid>/comm (15-char max)
+    "comm":        "cat",           // /proc/<pid>/comm (15-byte max)
     "exe":         "/usr/bin/cat",  // readlink /proc/<pid>/exe
     "exe_deleted": false,           // true when exe had " (deleted)" suffix
     "cmdline":     "cat secret",    // NUL→space, capped 4096 chars
     "cwd":         "/home/user",    // readlink /proc/<pid>/cwd
     "uid":         1000,            // real UID from /proc/<pid>/status
     "start_ticks": 123456,          // field 22 of /proc/<pid>/stat (PID reuse guard)
-    "exe_sha256":  "deadbeef..."    // SHA-256 hex of exe (omitted if >100 MB or deleted)
+    "exe_sha256":  "deadbeef..."    // SHA-256 hex of exe (omitted if >100 MB, unreadable, or PID reused)
   },
-  "ancestors": [             // PPID chain, depth ≤ 8; index 0 = immediate parent
-    { /* ProcessInfo */ },
+  "ancestors": [             // PPID chain, depth <= 8; index 0 = immediate parent
     { /* ProcessInfo */ }
   ],
-  "confidence":  "high",     // "low" | "medium" | "high" (see below)
+  "confidence":  3,          // uint8: 1 = low, 2 = medium, 3 = high (see below)
 
   // npm environment variables — only these three are captured (O7):
   "npm_package":         "lodash",   // npm_package_name
@@ -81,33 +80,31 @@ All string fields are pre-sanitized (ANSI, bidi, C0/C1 stripped).
 }
 ```
 
-### Confidence Levels
+### Confidence Values (`attribution.Confidence`, serialized as integer `1`/`2`/`3`)
 
-| Level | Meaning |
-|-------|---------|
-| `low` | PID read but `/proc/<pid>/` vanished before stat could complete, or PID reused between reads |
-| `medium` | exe resolved, ppid chain read; SHA-256 not computed (file deleted, or hash error) |
-| `high` | exe read and SHA-256 computed successfully (file ≤ 100 MB) |
+| JSON Value | Constant | `String()` Label | Meaning |
+|-----------:|----------|------------------|---------|
+| `1` | `ConfidenceLow` | `low` | PID read but `/proc/<pid>/` vanished before stat could complete, or PID reused between reads |
+| `2` | `ConfidenceMedium` | `medium` | `exe` resolved and `ppid` chain read; SHA-256 not computed (e.g., deleted binary, size > 100 MB, or read error) |
+| `3` | `ConfidenceHigh` | `high` | `exe` read and SHA-256 computed successfully with matching `start_ticks` |
 
 > [!IMPORTANT]
 > Attribution is **best-effort**: a process can exit before `/proc` is read.
 > Short-lived commands (e.g. `cat secret; rm -f secret`) may appear with
-> `confidence: low` and empty `exe`. This is expected behaviour, not a bug.
+> `confidence: 1` (`ConfidenceLow`) and empty `exe`. This is expected behaviour.
 
 ## Watcher Tiers
 
 | Tier | Technology | Platforms | Access Detection |
 |------|-----------|-----------|-----------------|
-| `tier1` | fanotify + inotify | Linux (requires `CAP_SYS_ADMIN`) | open, access, write, rename, delete + process attribution |
-| `tier2` | inotify | Linux | open, access (via IN_OPEN/IN_ACCESS), write, rename, delete |
-| `tier2` | fsnotify (ReadDirectoryChangesW) | Windows | write, rename, delete only (read-only opens not detectable) |
+| `tier1` | fanotify + inotify | Linux (root / `CAP_SYS_ADMIN`) | open, access, write, rename, delete + process attribution |
+| `tier2` | inotify | Linux | open, access (`IN_OPEN`/`IN_ACCESS`), write, rename, delete |
+| `tier2` | fsnotify (`ReadDirectoryChangesW`) | Windows | write, rename, delete only (read-only opens not detectable) |
 
 > [!WARNING]
-> On Windows (tier2), **pure read-only file access is not detectable**. This
-> is a known v1 limitation of the ReadDirectoryChangesW API. See the Windows
-> watcher source for details.
+> On Windows (`tier2`), **pure read-only file access is not detectable** via `ReadDirectoryChangesW`.
 
-## decoyd events CLI
+## `decoyd events` CLI
 
 ```
 decoyd events [flags]
@@ -123,15 +120,6 @@ Exit codes:
   0   Success (or no events when --fail-if-any)
   1   Fatal error
   3   Events found and --fail-if-any is set
-```
-
-## Example: CI Integration
-
-```yaml
-- name: Check for credential access
-  run: |
-    decoyd events --fail-if-any --since 10m --json
-  # Exit code 3 if any decoy was accessed; fail the build.
 ```
 
 ## Example: JSON Output
@@ -160,7 +148,7 @@ Exit codes:
         "exe_sha256": "a1b2c3..."
       },
       "ancestors": [],
-      "confidence": "high",
+      "confidence": 3,
       "npm_package": "evil-pkg",
       "npm_version": "1.0.0",
       "npm_lifecycle_event": "postinstall"

@@ -1,74 +1,113 @@
-# Catching an npm Package Stealing Your Credentials — A Technical Deep-Dive
+# Catching an npm Package Reading Decoy Credentials — Technical Notes
 
-> **DRAFT** — Not for publication. Numbers marked UNKNOWN must be replaced with
-> measured data before publishing. Numbers marked [RAN] are from actual runs.
+> **DRAFT** — Contains measured Tier 2 (`inotify`) results from our WSL2 test host.
+> Items marked **UNKNOWN** require root/`fanotify` execution on a privileged Linux host.
 
 ## The Problem
 
-Supply-chain attacks via npm packages have become a significant threat vector.
-A malicious `postinstall` script can read your `.npmrc`, `.pypirc`, `~/.ssh/id_rsa`,
-and other credential files in the few seconds during `npm install`, long before
-any traditional security tool has time to respond.
+A malicious npm `postinstall` script runs automatically during `npm install` (unless `--ignore-scripts`
+is set) and executes with the installing user's file permissions, allowing it to read files like
+`~/.npmrc`, `~/.pypirc`, or `~/.aws/credentials`.
 
-## Decoyd's Approach
+## Decoyd's Design
 
-Decoyd deploys **decoy credential files** at the same paths a real credential would
-occupy. These files contain high-entropy tokens that look authentic but can be
-instantly revoked. When any process opens one, Decoyd fires an alert.
+Decoyd generates realistic-looking decoy credential files containing **no static identifiers** (checked
+by an entropy-stripped denylist in `internal/tokens/tokens_test.go`), deploys them cleanly without
+following symlinks (`O_NOFOLLOW | O_EXCL` on Linux), and alerts when a decoy file is accessed:
 
-### How it Works
+- **Tier 1 (`fanotify`, Linux root / `CAP_SYS_ADMIN`)**: hybrid `FAN_CLASS_NOTIF` (`FAN_OPEN|FAN_ACCESS`,
+  never `*_PERM`) + `inotify` (write/move/delete + parent-dir recreate). Enriches events with `/proc/<pid>/`
+  attribution (`pid`, `ppid` chain up to depth 8, `comm`, `exe`, `cmdline`, `cwd`, `uid`, `start_ticks`,
+  `exe_sha256` <= 100 MB) and reads only `npm_package_name`, `npm_package_version`, and `npm_lifecycle_event`
+  from `/proc/<pid>/environ`.
+- **Tier 2 (`inotify` on Linux / `fsnotify` on Windows, unprivileged)**: detects file events and reports
+  token identity without process attribution. Note that on Windows, `ReadDirectoryChangesW` reports writes,
+  renames, and deletes only (not pure read-only opens).
 
-1. `decoyd deploy --all` writes decoy files to `~/.npmrc`, `~/.pypirc`, etc.
-2. `decoyd watch --tier1` starts the watcher:
-   - **Tier 1 (fanotify, Linux)**: catches the open/read syscall with full process
-     attribution — pid, executable path, full command line, and package context
-   - **Tier 2 (inotify/fsnotify)**: file-system events with token identity only
-3. When an alert fires, `decoyd events` shows the culprit package:
-   ```
-   likely culprit: evil-pkg@1.0.0 (npm postinstall, high confidence)
-   pid: 12345  exe: /usr/bin/node  cmdline: node postinstall.js
-   ```
+## Usage
 
-### Demo
+Generate and deploy decoy tokens using the interactive TUI (`decoyd`), or inspect headless state under a
+data directory containing `deployed_tokens.json` and `alert_config.json`:
 
 ```bash
-# Install decoyd
+# Install
 go install github.com/arjunjaincs/decoyd/cmd/decoyd@latest
 
-# Deploy decoys (safe — no real credentials touched)
-decoyd deploy --all
+# Launch TUI to generate & deploy decoy credential files
+decoyd
 
-# Start watching (Tier 2 on macOS/Windows, Tier 1 on Linux with sudo)
-sudo decoyd watch --tier1 &
+# Start headless watcher (Tier 2 unprivileged, or Tier 1 on Linux with sudo)
+decoyd watch                # Tier 2 (inotify/fsnotify)
+sudo decoyd watch --tier1   # Tier 1 (fanotify; errors if unavailable)
 
-# Simulate a malicious npm install
-npm install examples/demo-evil-pkg
+# Simulate a benign credential-scanning npm postinstall hook
+npm install --no-save ./examples/demo-evil-pkg
 
-# Check if anything was caught
-decoyd events --fail-if-any
+# Inspect events (table or raw TriggerEvent JSON) and fail CI builds if triggered
+decoyd events --json
+decoyd events --fail-if-any  # exits 3 if events exist
 ```
 
-## Performance
+An actual Tier 1 `TriggerEvent` record uses this structure (see [EVENT-SCHEMA.md](../EVENT-SCHEMA.md)):
 
-The file open+read+close syscall baseline is **4,261 ns** [RAN] — this is the
-minimum time window between the malicious process reading a credential and the
-kernel generating an event. Tier 1 (fanotify) processes this in the process's
-own kernel context, delivering the event to Decoyd with sub-millisecond latency
-(UNKNOWN — not yet measured end-to-end).
+```json
+{
+  "id": "8f4a2c1e9b3d7a05",
+  "token_id": "tok-abc123",
+  "token_type": "aws_credentials",
+  "path": "/home/runner/.aws/credentials",
+  "triggered_at": "2026-11-10T10:00:05Z",
+  "event_type": "access",
+  "status": "sent",
+  "watcher_tier": "tier1",
+  "attribution": {
+    "accessor": {
+      "pid": 4567,
+      "ppid": 4000,
+      "comm": "node",
+      "exe": "/usr/bin/node",
+      "cmdline": "node install.js",
+      "cwd": "/tmp/evil-pkg",
+      "uid": 1001,
+      "start_ticks": 998877
+    },
+    "confidence": 3,
+    "npm_package": "demo-evil-pkg",
+    "npm_version": "0.0.1",
+    "npm_lifecycle_event": "postinstall"
+  }
+}
+```
 
-## Comparison
+## Measured Performance (`6.18.58.1-microsoft-standard-WSL2`, i7-1265U, `go1.25.0`) [RAN]
 
-| Tool | Credential file detection | Process attribution | Supply-chain context | Deployment complexity |
-|------|--------------------------|--------------------|-----------------------|----------------------|
-| Decoyd (Tier 1) | ✅ Decoy-based | ✅ Full (pid, exe, pkg) | ✅ npm/pip | Low (single binary) |
-| Decoyd (Tier 2) | ✅ Decoy-based | ❌ | ❌ | Low |
-| auditd | ✅ Rule-based | ✅ | ❌ | Medium |
-| Falco | ✅ Rule-based | ✅ | ❌ | High (eBPF) |
-| Canarytokens | ✅ Network-based | ❌ | ❌ | Low (cloud) |
+All measurements below were collected against compiled `decoyd watch` (Tier 2 `inotify`, default `2s`
+per-path debounce). Tier 1 (`fanotify`) end-to-end benchmark figures are **UNKNOWN** locally because
+this WSL2 test environment did not permit non-interactive `sudo` (`FAN_CLASS_NOTIF`).
 
-> **Verify before publishing**: this table represents our understanding of these
-> tools at time of writing. Check each tool's current documentation.
+### Time-to-Alert (100 sequential child `cat` reads -> local HTTP webhook)
 
-## Conclusion
+- **p50**: `2008.90 ms` [RAN]
+- **p95**: `2011.19 ms` (rank 95/100; rank 96: `2011.34 ms`) [RAN]
+- **Max**: `2063.36 ms` [RAN]
+- **Min / Mean**: `2005.76 ms` / `2009.31 ms` [RAN]
+- **Tier 1 (`fanotify`)**: **UNKNOWN** — run `sudo -E decoyd watch --tier1 --data-dir <dir>` on a Linux host with `FAN_CLASS_NOTIF`.
 
-DRAFT — to be completed with measured latency data and a real-world example.
+(The `~2000 ms` floor comes directly from the default `2s` per-path debounce timer before webhook dispatch.)
+
+### Idle Memory (RSS) and CPU Over 30 Seconds
+
+- **1 decoy**: `10.90 MiB` avg RSS (`11,162 KiB`, range `11,160–11,172 KiB`), `0.033% CPU` (`1` tick / `30.02s`) [RAN]
+- **100 decoys**: `11.21 MiB` avg RSS (`11,474 KiB`, range `11,464–11,476 KiB`), `0.067% CPU` (`2` ticks / `30.02s`) [RAN]
+- **1000 decoys**: `12.52 MiB` avg RSS (`12,823 KiB`, range `12,780–12,844 KiB`), `0.033% CPU` (`1` tick / `30.02s`) [RAN]
+
+### False-Positive Observations (Tier 2 `inotify`)
+
+Zero webhook alerts fired across `ls -la`, `stat`, `find`, `git status`, `grep -r` in a sibling directory,
+and a 50-iteration `lstat`/`stat` loop; the `cat` positive control fired `1` alert [RAN].
+
+## Current Status
+
+Tier 1 `fanotify` lifecycle proof (`install --system`, `systemctl status`, child decoy read, `triggers.jsonl`
+schema check, unprivileged `decoyd events --json`, `sync`, and `uninstall --system`) runs in the GitHub
+Actions `system-lifecycle` CI job on `ubuntu-latest`.

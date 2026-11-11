@@ -1,25 +1,26 @@
 # Decoyd — Credential Decoy File Monitor
 
-**Deploy fake credential files. Get alerted the moment anything touches them.**
+**Deploy decoy credential files. Get alerted when anything accesses them.**
 
-Decoyd is a lightweight Go daemon that plants realistic-looking decoy credential
-files (`.npmrc`, `id_rsa`, `.git-credentials`, etc.) and fires an alert with
-full process attribution the instant any program opens one.
+Decoyd is a Go CLI/TUI and daemon that generates realistic decoy credential
+files (`.npmrc`, `id_rsa`, `.git-credentials`, AWS credentials, etc.) and fires an
+alert with process attribution (Tier 1 on Linux) or token identity (Tier 2)
+when a monitored file is accessed.
 
 ---
 
-## Quickstart (< 30 seconds)
+## Quickstart
 
 ```bash
 # Install
 go install github.com/arjunjaincs/decoyd/cmd/decoyd@latest
 
-# Deploy decoy credential files to their default locations
-decoyd deploy --all
+# Launch the interactive TUI to generate tokens, configure alert sinks, and deploy files
+decoyd
 
-# Start watching (Tier 2 on all platforms; Tier 1 on Linux with sudo)
+# Or run the headless watcher against an existing data dir (~/.decoyd by default)
 decoyd watch &              # Tier 2 (inotify/fsnotify, no root required)
-sudo decoyd watch --tier1   # Tier 1 (fanotify, Linux, full attribution)
+sudo decoyd watch --tier1   # Tier 1 (fanotify, Linux, full process attribution; errors if unavailable)
 
 # Check for detected accesses
 decoyd events
@@ -30,58 +31,62 @@ decoyd events --fail-if-any   # exit 3 if anything was caught (use in CI)
 
 ## Detection Tiers
 
-| Feature | Tier 1 (Linux, root) | Tier 2 (all platforms) |
-|---------|----------------------|------------------------|
-| Transport | fanotify | inotify / fsnotify |
-| Process pid + exe | ✅ | ❌ |
-| Full command line | ✅ | ❌ |
-| npm/pip package attribution | ✅ | ❌ |
+| Feature | Tier 1 (Linux, root / `CAP_SYS_ADMIN`) | Tier 2 (unprivileged) |
+|---------|----------------------------------------|-----------------------|
+| Transport | hybrid `fanotify` (`FAN_CLASS_NOTIF`) + `inotify` | Linux `inotify` / Windows `fsnotify` (`ReadDirectoryChangesW`) |
+| Process pid + exe + cmdline | ✅ | ❌ |
+| npm lifecycle hook attribution | ✅ (`npm_package`, `npm_version`, `npm_lifecycle_event` via `/proc/<pid>/environ`) | ❌ |
 | Root required | Yes | No |
-| macOS / Windows | ❌ | ✅ |
+| Windows read-only open detection | N/A | ❌ (write/rename/delete only on Windows) |
 
 ---
 
-## Token Types
+## Token Types (18)
 
-| File | Type | Format |
-|------|------|--------|
-| `~/.npmrc` | npm access token | `npm_<35 alphanumeric>` |
-| `~/.pypirc` | PyPI API token | `pypi-<60 base64url>` |
-| `~/.docker/config.json` | Docker registry | base64 auth string |
-| `~/.git-credentials` | Git store | GitHub PAT (`ghp_...`) |
-| `~/.netrc` | FTP/HTTP auth | 32-char alphanumeric |
-| `~/.ssh/id_rsa` | RSA-2048 private key | PKCS#1 PEM |
-| GCP service account JSON | GCP credentials | PKCS#8 key, realistic fields |
-| `credentials.tfrc.json` | Terraform Cloud | 51-char alphanumeric (plausible) |
-| `~/.vault-token` | Vault service token | `s.<24 alphanumeric>` |
-| `~/.cursor/mcp.json` | MCP server config | GitHub PAT (`ghp_...`) |
-| `~/.aws/credentials` | AWS credentials | AKIA-prefixed key |
-| `~/.kube/config` | Kubernetes config | base64 cert + bearer token |
-| SSH key (comment-free) | ED25519 / RSA | No static identifiers |
+| Filename | Type Key | Format |
+|----------|----------|--------|
+| `credentials` | `aws_credentials` | AWS `AKIA...` base32 access key + secret |
+| `id_ed25519` | `ssh_key` | Valid Ed25519 SSH keypair (no comment identifier) |
+| `.env` | `env_secrets` | `.env` with `DATABASE_URL`, `STRIPE_SECRET_KEY`, `JWT_SECRET` |
+| `.github_token` | `github_pat` | GitHub PAT (`ghp_...`) |
+| `.slack_token` | `slack_token` | Slack bot token (`xoxb-...`) |
+| `config` | `kubeconfig` | Kubeconfig YAML with random cluster/user + bearer token |
+| `backup.sql` | `db_dump` | SQL dump header, schema, fake rows |
+| `token.txt` | `dns_canary` | Unique subdomain label |
+| `.npmrc` | `npmrc` | npm access token (`npm_...`) |
+| `.pypirc` | `pypirc` | PyPI API token (`pypi-...`) |
+| `config.json` | `docker_config` | Docker registry base64 auth JSON |
+| `.git-credentials` | `git_credentials` | Git credential store URL with `ghp_...` PAT |
+| `.netrc` | `netrc` | `.netrc` host/login/password |
+| `id_rsa` | `rsa_key` | RSA-2048 private key in PKCS#1 PEM |
+| `service-account.json` | `gcp_service_account` | GCP service account JSON with PKCS#8 private key |
+| `credentials.tfrc.json` | `terraform_creds` | Terraform Cloud API token JSON |
+| `.vault-token` | `vault_token` | HashiCorp Vault token (`s.<24 chars>`) |
+| `mcp.json` | `mcp_config` | MCP server config JSON with `ghp_...` PAT |
 
 **Rule**: Generated tokens contain **no static identifiers** — tracing a leaked
-credential means looking up its VALUE, not its label.
+credential means looking up its value in the database, never embedding visible labels.
 
 ---
 
 ## Detection Content
 
-- `detection/decoyd-wazuh.xml` — Wazuh decoder + rules (UNVALIDATED)
-- `detection/decoyd.yml` — Sigma rules (UNVALIDATED against real toolchain)
-- `docs/ATTACK-MAPPING.md` — ATT&CK T1552.001 mapping
+- `detection/decoyd-wazuh.xml` — Wazuh decoder + rules (**syntax-checked, untested** against a real Wazuh 4.x installation)
+- `detection/decoyd.yml` — Sigma rules (**syntax-checked, untested** against live `sigma-cli` / SIEM)
+- `docs/ATTACK-MAPPING.md` — ATT&CK T1552.001 and related mapping
 
 ---
 
 ## System Install (Linux, persistent)
 
 ```bash
-# Install as a systemd service (runs as root, Tier 1)
+# Install systemd unit decoyd.service (writes only /usr/local/bin/decoyd, unit, /var/lib/decoyd, /etc/decoyd)
 sudo decoyd install --system --data-dir /var/lib/decoyd
 
-# Sync alert config from user to /etc/decoyd
+# Sync alert config from user dir to /etc/decoyd/alert_config.json (and deployed_tokens.json to /var/lib/decoyd/)
 sudo decoyd sync
 
-# Uninstall
+# Uninstall service, binary, /var/lib/decoyd, and /etc/decoyd
 sudo decoyd uninstall --system
 ```
 
@@ -91,7 +96,7 @@ sudo decoyd uninstall --system
 
 ```yaml
 - run: decoyd events --fail-if-any
-  # Exits 3 if any credential decoy was accessed; fails the CI job
+  # Exits 3 if any TriggerEvent was recorded; fails the CI job
 ```
 
 See `examples/github-action/decoyd-demo.yml` for a full demo workflow.
@@ -101,19 +106,19 @@ See `examples/github-action/decoyd-demo.yml` for a full demo workflow.
 ## Architecture
 
 ```
-cmd/decoyd/           Main binary (watch, deploy, events, install, doctor)
+cmd/decoyd/           Main binary (TUI, list, remove, watch, install, uninstall, sync, events, triggers, test, doctor)
 cmd/decoyd-emu/       Benign test emulator (read-only credential scanner)
-internal/watch/       Watcher (fanotify_linux.go, watch_linux.go, watch_windows.go)
-internal/attribution/ Process + package attribution types
-internal/tokens/      Token generators (12 types, no static identifiers)
+internal/watch/       Watchers (fanotify_linux.go, hybrid_linux.go, watch_linux.go, watch_windows.go, procinfo_linux.go)
+internal/attribution/ Process + attribution types
+internal/tokens/      Token generators (18 types, no static identifiers)
 internal/alert/       Alerters (Discord, Slack, Telegram, Teams, ntfy, webhook)
 internal/triglog/     triggers.jsonl (schema v1)
-detection/            Wazuh + Sigma detection content
-docs/                 ADR, EVENT-SCHEMA, ATTACK-MAPPING, BENCHMARKS
+detection/            Wazuh + Sigma detection content (syntax-checked, untested)
+docs/                 ADR, EVENT-SCHEMA, ATTACK-MAPPING, BENCHMARKS, THREAT-MODEL, blog draft
 ```
 
 ---
 
 ## License
 
-Apache 2.0. See LICENSE.
+Apache 2.0. See `LICENSE`.

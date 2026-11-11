@@ -1,71 +1,74 @@
 # Decoyd Benchmarks
 
-> All numbers on this page marked **[RAN]** were measured during development
-> on the system described below. Numbers marked UNKNOWN have not been measured.
-> Run `bash scripts/bench.sh` to regenerate on your hardware.
+Every number below marked **[RAN]** was directly measured in an execution run on
+the host environment listed below. Metrics requiring unobtainable local privileges
+are explicitly marked **UNKNOWN** with the exact command to reproduce them.
 
 ## Test Environment [RAN]
 
-- OS: Linux 5.15.167.4-microsoft-standard-WSL2 x86_64
-- CPU: 12th Gen Intel Core i7-1265U
-- Go: go1.25.0 linux/amd64
-- Date: 2026-11-10T14:05:00Z
-- fanotify: not available in WSL2 test environment (requires bare-metal or VM)
+- Kernel (`uname -r`): `6.18.58.1-microsoft-standard-WSL2`
+- CPU (`lscpu | head -20`): `12th Gen Intel(R) Core(TM) i7-1265U` (12 CPUs)
+- Go (`go version`): `go1.25.0 linux/amd64` (module `go 1.25.0`, toolchain `go1.26.10`)
+- WSL2: `yes` (`Linux version 6.18.58.1-microsoft-standard-WSL2 #1 SMP PREEMPT_DYNAMIC Tue Oct 27 00:24:11 UTC 2026`)
+- Tier 1 (`fanotify`) locally: `UNKNOWN` (unprivileged WSL2 cannot run interactive `sudo` / `FAN_CLASS_NOTIF`; `decoyd watch` falls back to Tier 2 `inotify`)
 
-## Snapshot Operations [RAN]
+## (a) Time-to-Alert Over 100 Runs (Child Read -> Local Webhook)
 
-These operations occur on watcher startup and reload (critical path).
+Methodology: 100 deployed decoy files watched by compiled `decoyd watch --data-dir <tmp>`.
+For each iteration `i = 0..99`, `cat <decoy_i>` runs as a child process at `t0`, and the local
+`httptest`/loopback HTTP webhook records receipt time `RecvAt` (`RecvAt - t0`).
+Default per-path debounce (`2s` = `2,000 ms`) is active in the headless watcher.
 
-| Operation | ns/op | B/op | allocs/op |
-|-----------|------:|-----:|----------:|
-| `WriteDeployedSnapshot` (20 tokens) | 76,186 | 8,989 | 13 |
-| `ReadDeployedSnapshot` (20 tokens) | 52,349 | 10,424 | 78 |
+| Metric | Tier 1 (fanotify) | Tier 2 (inotify, 2s debounce) [RAN] |
+|--------|-------------------|-------------------------------------|
+| Sample size | UNKNOWN | `100` runs |
+| Min | UNKNOWN | `2005.76 ms` |
+| p50 (median) | UNKNOWN | `2008.90 ms` |
+| Mean | UNKNOWN | `2009.31 ms` |
+| p95 | UNKNOWN | `2011.19 ms` (rank 95/100; rank 96: `2011.34 ms`) |
+| Max | UNKNOWN | `2063.36 ms` |
 
-Both operations complete in under 100 µs even for 20 tokens.
+To measure Tier 1 (`fanotify`) on a Linux host with root/`CAP_SYS_ADMIN`, run:
 
-## Syscall Baseline [RAN]
+```bash
+sudo -E decoyd watch --tier1 --data-dir <data-dir>
+# or verify Tier 1 child read detection end-to-end:
+go test -c -tags privileged -o /tmp/watch_priv.test ./internal/watch/ && sudo -E /tmp/watch_priv.test -test.v -test.run TestFanotify
+```
 
-| Operation | ns/op | B/op | allocs/op |
-|-----------|------:|-----:|----------:|
-| File open + read + close (baseline) | 4,261 | 184 | 3 |
+## (b) Idle RSS and CPU Over 30 Seconds (`N = 1, 100, 1000` Decoys)
 
-This is the **minimum possible latency floor** — a credential-stealing process performs
-at least one open+read+close, and the kernel generates the inotify/fanotify event
-during these syscalls.
+Methodology: Headless `decoyd watch` running idle for `30.02 s` per decoy count, sampled once
+per second from `/proc/<pid>/status` (`VmRSS`) and `/proc/<pid>/stat` (`utime + stime` CPU
+clock ticks at Linux `USER_HZ = 100 Hz`), cross-checked with `ps -o rss=,pcpu= -p <pid>`.
 
-## Time-to-Alert (End-to-End Latency)
+### Tier 2 (`inotify`) [RAN]
 
-> UNKNOWN — requires a live decoyd instance and a measurement harness.
-> Run `bash scripts/bench.sh` on a supported Linux host (not WSL2) with
-> `sudo decoyd watch --tier1` running to get real end-to-end numbers.
+| Decoy count | RSS Min (KiB) | RSS Avg (KiB / MiB) | RSS Max (KiB) | CPU ticks (`delta_ticks` / 30.02 s) | CPU % (`USER_HZ=100`) | `ps` snapshot (`rss pcpu`) |
+|------------:|--------------:|--------------------:|--------------:|-------------------------------------:|----------------------:|----------------------------|
+| 1 | 11,160 | 11,162 (`10.90 MiB`) | 11,172 | 1 tick (`0.010 s`) | `0.033%` | `11172  0.0` |
+| 100 | 11,464 | 11,474 (`11.21 MiB`) | 11,476 | 2 ticks (`0.020 s`) | `0.067%` | `11476  0.0` |
+| 1000 | 12,780 | 12,823 (`12.52 MiB`) | 12,844 | 1 tick (`0.010 s`) | `0.033%` | `12844  0.0` |
 
-| Metric | Tier 1 (fanotify) | Tier 2 (inotify) |
-|--------|-------------------|------------------|
-| p50 latency | UNKNOWN | UNKNOWN |
-| p95 latency | UNKNOWN | UNKNOWN |
-| max latency | UNKNOWN | UNKNOWN |
+### Tier 1 (`fanotify`)
 
-Expected ranges based on kernel event delivery characteristics:
-- **Tier 1 (fanotify)**: sub-millisecond on idle system (kernel calls handler synchronously in process context)
-- **Tier 2 (inotify)**: typically 1–10 ms (async event queue with Go goroutine read loop)
+> UNKNOWN — requires root/`CAP_SYS_ADMIN` on Linux:
+> `sudo -E decoyd watch --tier1 --data-dir <data-dir>` and sample `/proc/<pid>/status` (`VmRSS`) and `/proc/<pid>/stat`.
 
-These are **estimates only**; do not cite without a [RAN] measurement.
+## (c) False-Positive Suite (Tier 2 `inotify`, 2s Debounce, 2.6s Settle Window) [RAN]
 
-## Idle Resource Usage
+Setup: Git repository containing decoy files (`.npmrc`, `.env`, `.aws/credentials`), source
+file `src/app.js`, and a sibling directory (`sibling/notes.txt`). Webhook queue was drained
+before each operation and inspected for `2.6 s` afterward.
 
-> UNKNOWN — requires running `decoyd watch` and measuring RSS with `pmap` or `perf stat`.
+| Operation | Alerts Triggered | Outcome |
+|-----------|-----------------:|---------|
+| `ls -la <tree>` | 0 | No false positive |
+| `stat <decoy>` (`.npmrc`, `.env`) | 0 | No false positive |
+| `find <tree> -maxdepth 3` | 0 | No false positive |
+| `git status` (in repo with decoys) | 0 | No false positive |
+| `grep -rn API_TOKEN <sibling-dir>` | 0 | No false positive |
+| Editor-style `lstat`/`stat` loop (`50x`, `10 ms` interval) | 0 | No false positive |
+| Positive control: `cat <decoy>` | 1 | Expected alert |
 
-Approximate estimate (from code inspection, not measured):
-- Base RSS: ~10–15 MB (Go runtime + bbolt)
-- Per-token overhead: negligible (file descriptors + map entries, ~1 KB each)
-- 100 tokens: estimate ~15 MB total RSS (UNKNOWN — not measured)
-
-## False-Positive Analysis
-
-| Scenario | Risk | Mitigation |
-|----------|------|------------|
-| User reads own `.npmrc` with npm install | Expected TP | Decoyd only watches DECOY files, not real credentials |
-| Backup agent scans home directory | FP risk | Use process exclusion list (future feature) |
-| IDE/language server reads project files | Low risk | Deploy decoys outside project directories |
-| Security scanner | FP risk | Review `decoyd events` output; add to exclusion |
-| Developer running `cat ~/.npmrc` | Expected TP (intentional) | True positive by design — user placed the decoy there |
+Tier 1 (`fanotify`) false-positive sweep on this exact harness: `UNKNOWN` (requires root/`CAP_SYS_ADMIN`).
