@@ -305,7 +305,7 @@ func DeleteOne(dataDir, id string) error {
 	}
 
 	tmp := path + ".tmp"
-	// #nosec G304
+	// #nosec G304 -- tmp is always filepath.Join(dataDir, logFileName)+".tmp"
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("triglog rewrite open: %w", err)

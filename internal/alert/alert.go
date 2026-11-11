@@ -267,7 +267,7 @@ func Load(dataDir string) (AlertConfig, error) {
 		if lf, lerr := filelock.Lock(path); lerr == nil {
 			defer lf.Unlock()
 			// Re-read to pick up any concurrent write that beat us to the lock.
-			if fresh, rerr := os.ReadFile(path); rerr == nil { // #nosec G304
+			if fresh, rerr := os.ReadFile(path); rerr == nil { // #nosec G304 -- path is always filepath.Join(dataDir, configFileName)
 				var freshCfg AlertConfig
 				if jerr := json.Unmarshal(fresh, &freshCfg); jerr == nil {
 					// Merge: preserve any IDs already on disk, only fill blanks.
@@ -285,7 +285,7 @@ func Load(dataDir string) (AlertConfig, error) {
 			// Write updated config atomically: write to .tmp then rename.
 			if out, merr := json.MarshalIndent(cfg, "", "  "); merr == nil {
 				tmpPath := path + ".tmp"
-				if werr := os.WriteFile(tmpPath, out, 0o600); werr == nil { // #nosec G306
+				if werr := os.WriteFile(tmpPath, out, 0o600); werr == nil { // #nosec G306 -- atomic temp write uses restrictive 0600 permissions
 					_ = os.Rename(tmpPath, path)
 				}
 			}

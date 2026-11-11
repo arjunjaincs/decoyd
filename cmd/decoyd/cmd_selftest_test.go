@@ -26,7 +26,7 @@ func TestSelfTest_PipelineAlertArrives(t *testing.T) {
 	// Loopback webhook.
 	var alertCount int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.Copy(io.Discard, r.Body) //nolint:errcheck
+		_, _ = io.Copy(io.Discard, r.Body)
 		atomic.AddInt64(&alertCount, 1)
 		w.WriteHeader(http.StatusNoContent)
 	}))
