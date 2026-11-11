@@ -19,6 +19,7 @@ import (
 	"log"
 	"math"
 	"os"
+	"sync"
 	"syscall"
 	"time"
 
@@ -153,13 +154,15 @@ type fanotifyWatcher struct {
 	stopW  int // write end of stop pipe
 	ownPID int32
 
-	// tokenMap is the inode-keyed token lookup table.
-	// Written on start/reload; read in event loop (single goroutine).
+	doneOnce sync.Once
+	done     chan struct{}
+
+	mu sync.RWMutex
+	// tokenMap is the inode-keyed token lookup table (protected by mu).
 	tokenMap fanotifyTokenMap
 
-	// failedTokens: token IDs that could not be marked (fell back to inotify).
-	// Protected by the caller (hybridLinuxWatcher).
-	failedTokens map[string]string // token ID → reason
+	// failedTokens maps token ID -> fallback reason (protected by mu).
+	failedTokens map[string]string
 }
 
 // fanotifyInit initialises a fanotify file descriptor with FAN_CLASS_NOTIF.
@@ -207,6 +210,7 @@ func newFanotifyWatcher() (*fanotifyWatcher, error) {
 		stopR:        pipefd[0],
 		stopW:        pipefd[1],
 		ownPID:       ownPID,
+		done:         make(chan struct{}),
 		tokenMap:     make(fanotifyTokenMap),
 		failedTokens: make(map[string]string),
 	}, nil
@@ -254,37 +258,72 @@ func isErrno(err error, target syscall.Errno) bool {
 	}
 }
 
+func (fw *fanotifyWatcher) recordFailed(tokenID, reason string) {
+	fw.mu.Lock()
+	fw.failedTokens[tokenID] = reason
+	fw.mu.Unlock()
+}
+
+func (fw *fanotifyWatcher) snapshotFailed() map[string]string {
+	fw.mu.RLock()
+	defer fw.mu.RUnlock()
+	out := make(map[string]string, len(fw.failedTokens))
+	for k, v := range fw.failedTokens {
+		out[k] = v
+	}
+	return out
+}
+
+func (fw *fanotifyWatcher) snapshotMarkedTokens() []DeployedToken {
+	fw.mu.RLock()
+	defer fw.mu.RUnlock()
+	var out []DeployedToken
+	for _, m := range fw.tokenMap {
+		for _, t := range m {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
 // addMark adds a fanotify inode mark for a deployed token file.
-// O5: Lstat checks that the path is a regular file (not a symlink, device, etc.).
+// O5: Lstat checks that the path is a regular file (not a symlink) and matches OwnerUID.
 // On failure, records the token in failedTokens and returns false.
 func (fw *fanotifyWatcher) addMark(tok DeployedToken) bool {
-	// O5: Lstat — refuse symlinks, require regular file.
+	// O5: Lstat — refuse symlinks, require regular file, verify owner UID.
 	fi, err := os.Lstat(tok.DeployedPath)
 	if err != nil {
-		fw.failedTokens[tok.ID] = fmt.Sprintf("lstat: %v", err)
+		fw.recordFailed(tok.ID, fmt.Sprintf("lstat: %v", err))
 		return false
 	}
 	if fi.Mode()&os.ModeSymlink != 0 {
-		fw.failedTokens[tok.ID] = "path is a symlink"
+		reason := "path is a symlink (O5)"
+		log.Printf("fanotify: skipping token %s (%s): %s", tok.ID, tok.DeployedPath, reason)
+		fw.recordFailed(tok.ID, reason)
 		return false
 	}
 	if !fi.Mode().IsRegular() {
-		fw.failedTokens[tok.ID] = "path is not a regular file"
+		reason := "path is not a regular file (O5)"
+		log.Printf("fanotify: skipping token %s (%s): %s", tok.ID, tok.DeployedPath, reason)
+		fw.recordFailed(tok.ID, reason)
 		return false
 	}
 
-	// Get dev/ino for the inode map.
 	stat, ok := fi.Sys().(*syscall.Stat_t)
 	if !ok {
-		fw.failedTokens[tok.ID] = "cannot read stat_t"
+		fw.recordFailed(tok.ID, "cannot read stat_t")
+		return false
+	}
+	if tok.OwnerUID != nil && stat.Uid != *tok.OwnerUID {
+		reason := fmt.Sprintf("owner uid %d != snapshot uid %d (O5)", stat.Uid, *tok.OwnerUID)
+		log.Printf("fanotify: skipping token %s (%s): %s", tok.ID, tok.DeployedPath, reason)
+		fw.recordFailed(tok.ID, reason)
 		return false
 	}
 	dev := stat.Dev
 	ino := stat.Ino
 
 	// Add fanotify inode mark.
-	// FAN_MARK_ADD | FAN_MARK_INODE(=0) with mask FAN_OPEN | FAN_ACCESS.
-	// Use AT_FDCWD (-100) as dirFd; pathname must be absolute.
 	const mask = unix.FAN_OPEN | unix.FAN_ACCESS
 	if err := unix.FanotifyMark(fw.fanFD,
 		unix.FAN_MARK_ADD|unix.FAN_MARK_INODE,
@@ -293,44 +332,45 @@ func (fw *fanotifyWatcher) addMark(tok DeployedToken) bool {
 		tok.DeployedPath,
 	); err != nil {
 		if isUnavailableErr(err) {
-			fw.failedTokens[tok.ID] = fmt.Sprintf("mark unavailable: %v", err)
+			fw.recordFailed(tok.ID, fmt.Sprintf("mark unavailable: %v", err))
 			return false
 		}
-		fw.failedTokens[tok.ID] = fmt.Sprintf("fanotify_mark: %v", err)
+		fw.recordFailed(tok.ID, fmt.Sprintf("fanotify_mark: %v", err))
 		return false
 	}
 
-	// Store in inode map.
+	fw.mu.Lock()
 	if fw.tokenMap[dev] == nil {
 		fw.tokenMap[dev] = make(map[uint64]DeployedToken)
 	}
 	fw.tokenMap[dev][ino] = tok
+	delete(fw.failedTokens, tok.ID)
+	fw.mu.Unlock()
 	return true
 }
 
-// removeMark removes the fanotify inode mark for the given dev:ino.
+// removeMark removes the fanotify inode mark and clears all inode mappings for tok.ID.
 func (fw *fanotifyWatcher) removeMark(tok DeployedToken) {
-	fi, err := os.Lstat(tok.DeployedPath)
-	if err != nil {
-		return
+	if tok.DeployedPath != "" {
+		_ = unix.FanotifyMark(fw.fanFD,
+			unix.FAN_MARK_REMOVE,
+			unix.FAN_OPEN|unix.FAN_ACCESS,
+			unix.AT_FDCWD,
+			tok.DeployedPath,
+		)
 	}
-	stat, ok := fi.Sys().(*syscall.Stat_t)
-	if !ok {
-		return
-	}
-	_ = unix.FanotifyMark(fw.fanFD,
-		unix.FAN_MARK_REMOVE,
-		unix.FAN_OPEN|unix.FAN_ACCESS,
-		unix.AT_FDCWD,
-		tok.DeployedPath,
-	)
-	dev, ino := stat.Dev, stat.Ino
-	if m, ok := fw.tokenMap[dev]; ok {
-		delete(m, ino)
+	fw.mu.Lock()
+	for dev, m := range fw.tokenMap {
+		for ino, t := range m {
+			if t.ID == tok.ID {
+				delete(m, ino)
+			}
+		}
 		if len(m) == 0 {
 			delete(fw.tokenMap, dev)
 		}
 	}
+	fw.mu.Unlock()
 }
 
 // lookupByFD uses fstat on the event fd to find the matching token.
@@ -348,11 +388,13 @@ func (fw *fanotifyWatcher) lookupByFD(fd int32) (DeployedToken, bool) {
 	if err := unix.Fstat(int(fd), &st); err != nil {
 		return DeployedToken{}, false
 	}
+	fw.mu.RLock()
 	devMap, ok := fw.tokenMap[st.Dev]
-	if !ok {
-		return DeployedToken{}, false
+	var tok DeployedToken
+	if ok {
+		tok, ok = devMap[st.Ino]
 	}
-	tok, ok := devMap[st.Ino]
+	fw.mu.RUnlock()
 	return tok, ok
 }
 
@@ -408,7 +450,16 @@ func (s *fanotifyPidSet) add(pid int32) bool {
 // runFanotifyLoop reads events from the fanotify fd until stop is signalled.
 // dispatch is called in the event loop goroutine with the token and pid.
 // The function returns when the stop pipe is readable.
+func (fw *fanotifyWatcher) markDone() {
+	fw.doneOnce.Do(func() {
+		if fw.done != nil {
+			close(fw.done)
+		}
+	})
+}
+
 func (fw *fanotifyWatcher) runFanotifyLoop(dispatch func(tok DeployedToken, pid int32)) {
+	defer fw.markDone()
 	const bufSize = fanotifyMetadataSize * 256
 	buf := make([]byte, bufSize)
 
@@ -476,7 +527,7 @@ func (fw *fanotifyWatcher) runFanotifyLoop(dispatch func(tok DeployedToken, pid 
 
 		events, overflow := parseFanotifyEvents(buf[:nr])
 		if overflow {
-			log.Printf("fanotify: FAN_Q_OVERFLOW — some open/access events lost")
+			log.Printf("decoyd fanotify: event queue overflow (FAN_Q_OVERFLOW) — some open/access events lost")
 			// Do NOT fire all tokens. Per O1: log and continue.
 		}
 

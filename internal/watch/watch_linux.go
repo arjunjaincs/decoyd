@@ -24,9 +24,11 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 	"unsafe"
 
@@ -75,11 +77,97 @@ type linuxWatcher struct {
 	stopCh chan struct{}
 	// done is closed by the event loop goroutine when it exits.
 	done chan struct{}
+
+	// O2: per-token fanotify active set (when true, inotify access/open suppressed).
+	suppressedMu       sync.RWMutex
+	fanotifySuppressed map[string]bool
+	onTokensLoaded     func([]DeployedToken)
+	onFileCreate       func(DeployedToken)
+
+	// Per-watcher rate-limit state for fanotify dispatches.
+	fanRateMu  sync.Mutex
+	fanRateMap map[string]*rateEntry
 }
 
 // ----------------------------------------------------------------------------
 // start
 // ----------------------------------------------------------------------------
+
+// systemDataDirPath is the root-owned state directory for the Tier 1 daemon (O4).
+const (
+	systemDataDirPath   = "/var/lib/decoyd"
+	systemConfigDirPath = "/etc/decoyd"
+)
+
+func (w *linuxWatcher) setFanotifySuppressed(tokenID string, active bool) {
+	w.suppressedMu.Lock()
+	if w.fanotifySuppressed == nil {
+		w.fanotifySuppressed = make(map[string]bool)
+	}
+	if active {
+		w.fanotifySuppressed[tokenID] = true
+	} else {
+		delete(w.fanotifySuppressed, tokenID)
+	}
+	w.suppressedMu.Unlock()
+}
+
+func (w *linuxWatcher) isFanotifySuppressed(tokenID string) bool {
+	w.suppressedMu.RLock()
+	active := w.fanotifySuppressed[tokenID]
+	w.suppressedMu.RUnlock()
+	return active
+}
+
+// validateTokenPathO5 enforces O5 on a snapshot-loaded path:
+//  1. Lstat the path.
+//  2. If missing on disk, return (exists=false, ok=true) so parent-dir watches can detect creation.
+//  3. Refuse symlinks and non-regular files (log & skip).
+//  4. If tok.OwnerUID is set, require st.Uid == *tok.OwnerUID (log & skip).
+func validateTokenPathO5(tok DeployedToken) (exists bool, ok bool) {
+	fi, err := os.Lstat(tok.DeployedPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, true
+		}
+		log.Printf("decoyd watch: skipping token %s (%s): lstat: %v (O5)", tok.ID, tok.DeployedPath, err)
+		return false, false
+	}
+	if fi.Mode()&os.ModeSymlink != 0 || !fi.Mode().IsRegular() {
+		log.Printf("decoyd watch: skipping token %s (%s): symlink or non-regular file refused (O5)", tok.ID, tok.DeployedPath)
+		return true, false
+	}
+	if tok.OwnerUID != nil {
+		st, sysOK := fi.Sys().(*syscall.Stat_t)
+		if !sysOK {
+			log.Printf("decoyd watch: skipping token %s (%s): cannot inspect file uid (O5)", tok.ID, tok.DeployedPath)
+			return true, false
+		}
+		if st.Uid != *tok.OwnerUID {
+			log.Printf("decoyd watch: skipping token %s (%s): owner uid %d != snapshot uid %d (O5)", tok.ID, tok.DeployedPath, st.Uid, *tok.OwnerUID)
+			return true, false
+		}
+	}
+	return true, true
+}
+
+func loadAlertConfigForWatcher(dataDir string) (alert.AlertConfig, error) {
+	if filepath.Clean(dataDir) == systemDataDirPath && os.Geteuid() == 0 {
+		sysCfgPath := filepath.Join(systemConfigDirPath, "alert_config.json")
+		if _, err := os.Stat(sysCfgPath); err == nil {
+			return alert.Load(systemConfigDirPath)
+		}
+	}
+	return alert.Load(dataDir)
+}
+
+func appendTriglogForWatcher(dataDir string, ev triglog.TriggerEvent) {
+	_ = triglog.Append(dataDir, ev)
+	if filepath.Clean(dataDir) == systemDataDirPath && os.Geteuid() == 0 {
+		// O4: /var/lib/decoyd triggers.jsonl contains no secrets and must be readable by unprivileged CLI/TUI.
+		_ = os.Chmod(filepath.Join(dataDir, "triggers.jsonl"), 0o644) // #nosec G302 -- triggers.jsonl holds no secrets (O4/O8) and must be readable by unprivileged decoyd events
+	}
+}
 
 func (w *linuxWatcher) start() error {
 	w.mu.Lock()
@@ -130,18 +218,31 @@ func (w *linuxWatcher) start() error {
 		return fmt.Errorf("load tokens: %w", err)
 	}
 
-	// Add one inotify watch per deployed path.
-	// path → DeployedToken (for alert dispatch)
+	// Run optional pre-loop hook (used by Tier 1 hybrid to attach fanotify marks
+	// and populate suppression state before eventLoop starts).
+	if w.onTokensLoaded != nil {
+		w.onTokensLoaded(tokens)
+	}
+
+	// Add one inotify watch per valid deployed path (O5 checked before watching).
 	const mask = unix.IN_OPEN | unix.IN_ACCESS | unix.IN_MODIFY |
 		unix.IN_MOVE_SELF | unix.IN_DELETE_SELF
 	w.wdMap = make(map[int32]DeployedToken) // wd → token; protected by wdMu
+	validTokens := make([]DeployedToken, 0, len(tokens))
 	for _, tok := range tokens {
 		if tok.DeployedPath == "" {
 			continue
 		}
+		exists, ok := validateTokenPathO5(tok)
+		if !ok {
+			continue // O5 refusal: skipped and logged
+		}
+		validTokens = append(validTokens, tok)
+		if !exists {
+			continue // parent-dir watch will pick up creation
+		}
 		wd, err := unix.InotifyAddWatch(w.inoFD, tok.DeployedPath, mask)
 		if err != nil {
-			// File may not exist yet — skip silently, not fatal.
 			continue
 		}
 		w.wdMap[int32(wd)] = tok // #nosec G115 -- InotifyAddWatch returns int; Linux WDs are positive and bounded within int32 range
@@ -149,18 +250,11 @@ func (w *linuxWatcher) start() error {
 
 	w.count = len(w.wdMap)
 
-	// Add parent-directory inotify watches for all known token directories.
-	// This allows detecting files created/renamed into the directory AFTER start,
-	// without needing a Reload() call.
-	// Ref: inotify(7) - IN_CREATE fires when a file is created in the watched dir;
-	// IN_MOVED_TO fires when a file is renamed into the watched dir.
+	// Add parent-directory inotify watches for valid token directories.
 	const dirMask = unix.IN_CREATE | unix.IN_MOVED_TO | unix.IN_DELETE | unix.IN_MOVED_FROM
 	w.dirWdMap = make(map[int32]string)
 	w.dirTokens = make(map[string]map[string]DeployedToken)
-	for _, tok := range tokens {
-		if tok.DeployedPath == "" {
-			continue
-		}
+	for _, tok := range validTokens {
 		dir := filepath.Dir(tok.DeployedPath)
 		base := filepath.Base(tok.DeployedPath)
 		if _, exists := w.dirTokens[dir]; !exists {
@@ -364,15 +458,20 @@ func (w *linuxWatcher) eventLoop(mask uint32) {
 					if dirTok, hasTok := dirToks[name]; hasTok {
 						fullPath := filepath.Join(dirPath, name)
 						if evMask&(unix.IN_CREATE|unix.IN_MOVED_TO) != 0 {
-							// File appeared in directory - add a file-level watch.
-							newWD, addErr := unix.InotifyAddWatch(w.inoFD, fullPath, mask)
-							if addErr == nil {
-								w.wdMu.Lock()
-								w.wdMap[int32(newWD)] = dirTok // #nosec G115 -- WD positive
-								w.mu.Lock()
-								w.count = len(w.wdMap)
-								w.mu.Unlock()
-								w.wdMu.Unlock()
+							// O5 check before watching newly created/moved file.
+							if ex, ok := validateTokenPathO5(dirTok); ex && ok {
+								newWD, addErr := unix.InotifyAddWatch(w.inoFD, fullPath, mask)
+								if addErr == nil {
+									w.wdMu.Lock()
+									w.wdMap[int32(newWD)] = dirTok // #nosec G115 -- WD positive
+									w.mu.Lock()
+									w.count = len(w.wdMap)
+									w.mu.Unlock()
+									w.wdMu.Unlock()
+								}
+								if cb := w.onFileCreate; cb != nil {
+									cb(dirTok)
+								}
 							}
 						} else if evMask&(unix.IN_DELETE|unix.IN_MOVED_FROM) != 0 {
 							// File removed from directory - remove its file-level watch if present.
@@ -400,6 +499,10 @@ func (w *linuxWatcher) eventLoop(mask uint32) {
 
 			evType := inotifyEventType(evMask)
 			if evType == "" {
+				continue
+			}
+			// O2: while token's fanotify mark is active, suppress inotify open/access alerts.
+			if evType == "access" && w.isFanotifySuppressed(tok.ID) {
 				continue
 			}
 
@@ -437,14 +540,19 @@ func (w *linuxWatcher) eventLoop(mask uint32) {
 						return
 					}
 					w.mu.Unlock()
-					newWD, err := unix.InotifyAddWatch(fd, t.DeployedPath, mask)
-					if err == nil {
-						w.wdMu.Lock()
-						w.wdMap[int32(newWD)] = t // #nosec G115 -- InotifyAddWatch returns int; Linux WDs are positive and bounded within int32 range
-						w.mu.Lock()
-						w.count = len(w.wdMap)
-						w.mu.Unlock()
-						w.wdMu.Unlock()
+					if ex, ok := validateTokenPathO5(t); ex && ok {
+						newWD, err := unix.InotifyAddWatch(fd, t.DeployedPath, mask)
+						if err == nil {
+							w.wdMu.Lock()
+							w.wdMap[int32(newWD)] = t // #nosec G115 -- InotifyAddWatch returns int; Linux WDs are positive and bounded within int32 range
+							w.mu.Lock()
+							w.count = len(w.wdMap)
+							w.mu.Unlock()
+							w.wdMu.Unlock()
+						}
+						if cb := w.onFileCreate; cb != nil {
+							cb(t)
+						}
 					}
 				}(tok, snapFD)
 			}
@@ -472,7 +580,7 @@ func inotifyEventType(mask uint32) string {
 // events for this token are suppressed until the current rate-limit window expires.
 // It is called at most once per token per window (guarded by rateEntry.alertSent).
 func (w *linuxWatcher) sendSuppressionAlert(tok DeployedToken, now time.Time) {
-	alertCfg, err := alert.Load(w.dataDir)
+	alertCfg, err := loadAlertConfigForWatcher(w.dataDir)
 	if err != nil {
 		return
 	}
@@ -531,7 +639,7 @@ func (w *linuxWatcher) dispatch(rateMap map[string]*rateEntry, tok DeployedToken
 	// Quiet hours check.
 	if w.cfg.inQuietHours(now) {
 		ev.Status = triglog.TriggerQuietHours
-		_ = triglog.Append(w.dataDir, ev)
+		appendTriglogForWatcher(w.dataDir, ev)
 		return
 	}
 
@@ -548,7 +656,7 @@ func (w *linuxWatcher) dispatch(rateMap map[string]*rateEntry, tok DeployedToken
 		re.count++
 		if re.count > limit {
 			ev.Status = triglog.TriggerRateLimited
-			_ = triglog.Append(w.dataDir, ev)
+			appendTriglogForWatcher(w.dataDir, ev)
 			// Send ONE suppression alert per token per window.
 			if !re.alertSent {
 				re.alertSent = true
@@ -559,14 +667,14 @@ func (w *linuxWatcher) dispatch(rateMap map[string]*rateEntry, tok DeployedToken
 	}
 
 	// Write pending record before dispatch (durability).
-	_ = triglog.Append(w.dataDir, ev)
+	appendTriglogForWatcher(w.dataDir, ev)
 
 	// Resolve alert channel.
-	alertCfg, err := alert.Load(w.dataDir)
+	alertCfg, err := loadAlertConfigForWatcher(w.dataDir)
 	if err != nil {
 		ev.Status = triglog.TriggerFailed
 		ev.AlertError = "failed to load alert config"
-		_ = triglog.Append(w.dataDir, ev)
+		appendTriglogForWatcher(w.dataDir, ev)
 		return
 	}
 	ch, ok := alertCfg.ChannelForToken(tok.AlertChannelID)
@@ -574,7 +682,7 @@ func (w *linuxWatcher) dispatch(rateMap map[string]*rateEntry, tok DeployedToken
 		// No channel configured — log and continue, not an error.
 		ev.Status = triglog.TriggerFailed
 		ev.AlertError = "no alert channel configured"
-		_ = triglog.Append(w.dataDir, ev)
+		appendTriglogForWatcher(w.dataDir, ev)
 		return
 	}
 
@@ -582,7 +690,7 @@ func (w *linuxWatcher) dispatch(rateMap map[string]*rateEntry, tok DeployedToken
 	if err != nil {
 		ev.Status = triglog.TriggerFailed
 		ev.AlertError = alert.SanitizeErrString(err)
-		_ = triglog.Append(w.dataDir, ev)
+		appendTriglogForWatcher(w.dataDir, ev)
 		return
 	}
 
@@ -603,19 +711,15 @@ func (w *linuxWatcher) dispatch(rateMap map[string]*rateEntry, tok DeployedToken
 	} else {
 		ev.Status = triglog.TriggerSent
 	}
-	_ = triglog.Append(w.dataDir, ev)
+	appendTriglogForWatcher(w.dataDir, ev)
 }
 
 // ----------------------------------------------------------------------------
 // dispatchFanotifyEvent — called from the fanotify dispatch goroutine (T2)
 // ----------------------------------------------------------------------------
 
-// fanotifyRateMap is owned by dispatchFanotifyEvent calls; not shared with inotify.
-// Because dispatchFanotifyEvent is called from a single goroutine, no mutex needed.
-var fanotifyRateMap = map[string]*rateEntry{}
-
 // dispatchFanotifyEvent dispatches an alert for a fanotify-detected access.
-// Called from hybridLinuxWatcher.runFanotifyDispatch (single goroutine).
+// Called from hybridLinuxWatcher.runFanotifyDispatch.
 // attr may be nil when attribution data is unavailable.
 func (w *linuxWatcher) dispatchFanotifyEvent(tok DeployedToken, pid int32, attr *attribution.Attribution) {
 	now := time.Now()
@@ -638,7 +742,7 @@ func (w *linuxWatcher) dispatchFanotifyEvent(tok DeployedToken, pid int32, attr 
 	// Quiet hours check.
 	if w.cfg.inQuietHours(now) {
 		ev.Status = triglog.TriggerQuietHours
-		_ = triglog.Append(w.dataDir, ev)
+		appendTriglogForWatcher(w.dataDir, ev)
 		return
 	}
 
@@ -647,39 +751,48 @@ func (w *linuxWatcher) dispatchFanotifyEvent(tok DeployedToken, pid int32, attr 
 	if limit <= 0 {
 		limit = 5
 	}
-	re := fanotifyRateMap[tok.ID]
+	w.fanRateMu.Lock()
+	if w.fanRateMap == nil {
+		w.fanRateMap = make(map[string]*rateEntry)
+	}
+	re := w.fanRateMap[tok.ID]
+	rateExceeded := false
 	if re == nil || now.After(re.windowEnd) {
-		fanotifyRateMap[tok.ID] = &rateEntry{count: 1, windowEnd: now.Add(time.Hour)}
+		w.fanRateMap[tok.ID] = &rateEntry{count: 1, windowEnd: now.Add(time.Hour)}
 	} else {
 		re.count++
 		if re.count > limit {
-			ev.Status = triglog.TriggerRateLimited
-			_ = triglog.Append(w.dataDir, ev)
-			return
+			rateExceeded = true
 		}
 	}
+	w.fanRateMu.Unlock()
+	if rateExceeded {
+		ev.Status = triglog.TriggerRateLimited
+		appendTriglogForWatcher(w.dataDir, ev)
+		return
+	}
 
-	_ = triglog.Append(w.dataDir, ev)
+	appendTriglogForWatcher(w.dataDir, ev)
 
-	alertCfg, err := alert.Load(w.dataDir)
+	alertCfg, err := loadAlertConfigForWatcher(w.dataDir)
 	if err != nil {
 		ev.Status = triglog.TriggerFailed
 		ev.AlertError = "failed to load alert config"
-		_ = triglog.Append(w.dataDir, ev)
+		appendTriglogForWatcher(w.dataDir, ev)
 		return
 	}
 	ch, ok := alertCfg.ChannelForToken(tok.AlertChannelID)
 	if !ok {
 		ev.Status = triglog.TriggerFailed
 		ev.AlertError = "no alert channel configured"
-		_ = triglog.Append(w.dataDir, ev)
+		appendTriglogForWatcher(w.dataDir, ev)
 		return
 	}
 	a, err := alert.NewAlerter(ch)
 	if err != nil {
 		ev.Status = triglog.TriggerFailed
 		ev.AlertError = alert.SanitizeErrString(err)
-		_ = triglog.Append(w.dataDir, ev)
+		appendTriglogForWatcher(w.dataDir, ev)
 		return
 	}
 
@@ -700,7 +813,7 @@ func (w *linuxWatcher) dispatchFanotifyEvent(tok DeployedToken, pid int32, attr 
 	} else {
 		ev.Status = triglog.TriggerSent
 	}
-	_ = triglog.Append(w.dataDir, ev)
+	appendTriglogForWatcher(w.dataDir, ev)
 }
 
 // ----------------------------------------------------------------------------
@@ -763,10 +876,19 @@ func (w *linuxWatcher) reload() error {
 		return fmt.Errorf("reload: load tokens: %w", err)
 	}
 
-	// Build a path→token map for the new list.
+	// Build a path→token map for valid tokens (O5 enforced).
 	newByPath := make(map[string]DeployedToken, len(tokens))
+	validReloadTokens := make([]DeployedToken, 0, len(tokens))
 	for _, t := range tokens {
-		if t.DeployedPath != "" {
+		if t.DeployedPath == "" {
+			continue
+		}
+		exists, ok := validateTokenPathO5(t)
+		if !ok {
+			continue
+		}
+		validReloadTokens = append(validReloadTokens, t)
+		if exists {
 			newByPath[t.DeployedPath] = t
 		}
 	}
@@ -806,10 +928,7 @@ func (w *linuxWatcher) reload() error {
 	// Sync parent-directory watches for new/removed token directories.
 	const dirMask = unix.IN_CREATE | unix.IN_MOVED_TO | unix.IN_DELETE | unix.IN_MOVED_FROM
 	newDirTokens := make(map[string]map[string]DeployedToken)
-	for _, t := range tokens {
-		if t.DeployedPath == "" {
-			continue
-		}
+	for _, t := range validReloadTokens {
 		d := filepath.Dir(t.DeployedPath)
 		if newDirTokens[d] == nil {
 			newDirTokens[d] = make(map[string]DeployedToken)
