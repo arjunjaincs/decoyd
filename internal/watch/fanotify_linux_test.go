@@ -345,7 +345,7 @@ func TestParseFanotifyBoundsAndOverflow(t *testing.T) {
 	binary.LittleEndian.PutUint32(buf[16:20], uint32(readFD))
 	binary.LittleEndian.PutUint32(buf[20:24], uint32(0x80000000))
 
-	events, overflow := parseFanotifyEvents(buf)
+	events, overflow := parseFanotifyEventsWithCloser(buf, func(fd int) { _ = unix.Close(fd) })
 	if overflow || len(events) != 0 {
 		t.Fatalf("got events=%d overflow=%v; want 0, false", len(events), overflow)
 	}
@@ -353,5 +353,26 @@ func TestParseFanotifyBoundsAndOverflow(t *testing.T) {
 	if err := unix.Fstat(readFD, &st); err == nil {
 		_ = unix.Close(readFD)
 		t.Fatal("fd should have been closed when PID overflowed")
+	}
+}
+
+func TestParseFanotifyEventsWithCloser_ClosesOrphanFDs(t *testing.T) {
+	overflowBuf := makeFanotifyEvent(fanotifyMetadataSize, fanotifyMetadataVersion, unix.FAN_Q_OVERFLOW, 42, 0)
+	badPIDBuf := make([]byte, fanotifyMetadataSize)
+	copy(badPIDBuf, makeFanotifyEvent(fanotifyMetadataSize, fanotifyMetadataVersion, unix.FAN_OPEN, 77, 1))
+	badPIDBuf[23] = 0xec // out-of-range uint32 pid > math.MaxInt32
+
+	var closed []int
+	evs, overflow := parseFanotifyEventsWithCloser(append(overflowBuf, badPIDBuf...), func(fd int) {
+		closed = append(closed, fd)
+	})
+	if !overflow {
+		t.Fatal("expected overflow = true")
+	}
+	if len(evs) != 0 {
+		t.Fatalf("expected 0 normal events, got %d", len(evs))
+	}
+	if len(closed) != 2 || closed[0] != 42 || closed[1] != 77 {
+		t.Fatalf("closed fds = %v; want [42 77]", closed)
 	}
 }

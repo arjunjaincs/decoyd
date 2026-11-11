@@ -94,15 +94,21 @@ func safeIntToInt32(v int) (int32, bool) {
 	return int32(v), true
 }
 
+// parseFanotifyEvents parses raw fanotify metadata records without closing file descriptors.
+// Callers reading from the live kernel fd must use parseFanotifyEventsWithCloser with unix.Close.
 func parseFanotifyEvents(buf []byte) (events []fanotifyEvent, overflow bool) {
+	return parseFanotifyEventsWithCloser(buf, nil)
+}
+
+func parseFanotifyEventsWithCloser(buf []byte, closeFD func(int)) (events []fanotifyEvent, overflow bool) {
 	offset := 0
 	for offset+fanotifyMetadataSize <= len(buf) {
-		// Read event_len first to know how to advance.
-		eventLen := int(binary.LittleEndian.Uint32(buf[offset : offset+4]))
-		if eventLen < fanotifyMetadataSize || offset+eventLen > len(buf) {
-			// Malformed — stop parsing; remaining bytes are dropped.
+		eventLen32 := binary.LittleEndian.Uint32(buf[offset : offset+4])
+		if eventLen32 < fanotifyMetadataSize || uint64(eventLen32) > uint64(len(buf)-offset) {
+			// Malformed or truncated — stop parsing; remaining bytes are dropped.
 			break
 		}
+		eventLen := int(eventLen32)
 
 		// Validate version.
 		vers := buf[offset+4]
@@ -119,9 +125,8 @@ func parseFanotifyEvents(buf []byte) (events []fanotifyEvent, overflow bool) {
 		pid, pidOK := parseFanotifyPID(rawPID)
 
 		if mask&unix.FAN_Q_OVERFLOW != 0 {
-			// Overflow — close fd if valid.
-			if fdOK && fd >= 0 {
-				_ = unix.Close(int(fd))
+			if closeFD != nil && fdOK && fd >= 0 {
+				closeFD(int(fd))
 			}
 			overflow = true
 			offset += eventLen
@@ -129,9 +134,8 @@ func parseFanotifyEvents(buf []byte) (events []fanotifyEvent, overflow bool) {
 		}
 
 		if !fdOK || !pidOK {
-			// Out-of-bounds/malformed fd or pid — close valid fd if any and skip.
-			if fdOK && fd >= 0 {
-				_ = unix.Close(int(fd))
+			if closeFD != nil && fdOK && fd >= 0 {
+				closeFD(int(fd))
 			}
 			offset += eventLen
 			continue
@@ -525,7 +529,7 @@ func (fw *fanotifyWatcher) runFanotifyLoop(dispatch func(tok DeployedToken, pid 
 			continue
 		}
 
-		events, overflow := parseFanotifyEvents(buf[:nr])
+		events, overflow := parseFanotifyEventsWithCloser(buf[:nr], func(fd int) { _ = unix.Close(fd) })
 		if overflow {
 			log.Printf("decoyd fanotify: event queue overflow (FAN_Q_OVERFLOW) — some open/access events lost")
 			// Do NOT fire all tokens. Per O1: log and continue.
