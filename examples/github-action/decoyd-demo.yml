@@ -1,10 +1,7 @@
 # examples/github-action/decoyd-demo.yml
 # GitHub Actions workflow demonstrating Decoyd credential-access detection.
 #
-# Flow: build -> deploy decoys -> watch --tier1 -> install demo pkg -> assert alert
-#
-# VALIDATION STATUS: YAML-parsed locally. NOT run against a real GitHub Actions
-# runner; CI validation expected once the branch is pushed.
+# Flow: build -> seed decoy snapshot -> watch --tier1 -> install demo pkg -> assert alert
 
 name: Decoyd Demo — Credential Access Detection
 
@@ -26,13 +23,13 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version-file: go.mod
-          cache: true
+          go-version: "stable"
+          cache: false
 
       - name: Build decoyd and decoyd-emu
         run: |
@@ -41,21 +38,41 @@ jobs:
           sudo install -m 0755 /tmp/decoyd /usr/local/bin/decoyd
           sudo install -m 0755 /tmp/decoyd-emu /usr/local/bin/decoyd-emu
 
-      - name: Deploy decoy credential files
+      - name: Prepare decoy credential file and headless snapshot
         run: |
           DATA_DIR="$HOME/.decoyd-demo"
           mkdir -p "$DATA_DIR"
-          decoyd deploy --all --data-dir "$DATA_DIR"
+          SECRET_VAL="$(openssl rand -hex 20)"
+          printf '//registry.npmjs.org/:_authToken=npm_%s\n' "$SECRET_VAL" > "$HOME/.npmrc"
+          chmod 0600 "$HOME/.npmrc"
+          OWNER_UID="$(id -u)"
+          cat <<EOF > "$DATA_DIR/deployed_tokens.json"
+          [
+            {
+              "id": "demo-npmrc-tok1",
+              "type": "npmrc",
+              "deployed_path": "$HOME/.npmrc",
+              "owner_uid": $OWNER_UID
+            }
+          ]
+          EOF
           echo "DATA_DIR=$DATA_DIR" >> "$GITHUB_ENV"
 
       - name: Start decoyd watch (Tier 1, background)
         run: |
           sudo -E /usr/local/bin/decoyd watch --tier1 --data-dir "$DATA_DIR" > /tmp/decoyd-watch.log 2>&1 &
           echo "DECOYD_PID=$!" >> "$GITHUB_ENV"
-          sleep 2
+          for i in $(seq 1 20); do
+            if grep -q "decoyd watch started" /tmp/decoyd-watch.log 2>/dev/null; then
+              exit 0
+            fi
+            sleep 0.5
+          done
+          cat /tmp/decoyd-watch.log || true
+          exit 1
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '20'
 
@@ -69,11 +86,11 @@ jobs:
       - name: Assert Decoyd detected the access
         run: |
           echo "=== Recent Decoyd events ==="
-          decoyd events --json --data-dir "$DATA_DIR" || true
+          sudo /usr/local/bin/decoyd events --json --data-dir "$DATA_DIR" || true
           echo ""
           echo "=== Checking for credential access events ==="
-          decoyd events --fail-if-any --data-dir "$DATA_DIR"
-          RESULT=$?
+          RESULT=0
+          sudo /usr/local/bin/decoyd events --fail-if-any --data-dir "$DATA_DIR" || RESULT=$?
           if [ "$RESULT" -eq 3 ]; then
             echo "SUCCESS: Decoyd detected credential access!"
             exit 0

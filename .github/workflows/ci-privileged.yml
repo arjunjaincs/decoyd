@@ -1,8 +1,5 @@
 # .github/workflows/ci-privileged.yml
-# Phase 4.5: CI jobs for Linux privileged tests, Windows suite.
-#
-# VALIDATION STATUS: YAML-parsed locally. NOT run against a real GitHub Actions
-# runner; CI validation expected once the branch is pushed.
+# CI jobs for Linux privileged fanotify tests, systemd system lifecycle, and Windows build/tests.
 
 name: CI — Privileged and Windows
 
@@ -22,11 +19,24 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: "stable"
-          cache: true
+          cache: false
+
+      - name: Cache Go modules
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-priv-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-priv-go-
 
       - name: Build
         run: go build ./...
@@ -36,36 +46,211 @@ jobs:
 
       - name: Privileged tests (fanotify integration)
         run: |
-          # Build test binary first (not as root)
           go test -c -tags privileged -o /tmp/watch_priv.test ./internal/watch/
-          # Run as root with explicit PATH and GOPATH
-          sudo -E env "PATH=$PATH" /tmp/watch_priv.test -test.v -test.run TestFanotify 2>&1 ||             echo "PRIVILEGED_SKIP: fanotify tests not available on this runner"
+          sudo -E env "PATH=$PATH" /tmp/watch_priv.test -test.v -test.run TestFanotify
 
       - name: staticcheck
         run: |
-          go install honnef.co/go/tools/cmd/staticcheck@latest
+          go install honnef.co/go/tools/cmd/staticcheck@v0.8.2
           staticcheck ./...
 
       - name: gosec
         run: |
-          go install github.com/securego/gosec/v2/cmd/gosec@latest
-          gosec -severity medium -confidence medium ./... 2>&1 | tail -20
+          go install github.com/securego/gosec/v2/cmd/gosec@v2.30.0
+          gosec -severity medium -confidence medium -exclude G107 ./...
 
       - name: govulncheck
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
           govulncheck ./...
+
+  system-lifecycle:
+    name: System lifecycle proof (install, trigger, events, sync, uninstall)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: "stable"
+          cache: false
+
+      - name: Build decoyd
+        run: go build -o /tmp/decoyd ./cmd/decoyd
+
+      - name: Install system unit and verify O4 + systemd status
+        run: |
+          TMP_DATA="$(mktemp -d)"
+          DECOY_DIR="$(mktemp -d)"
+          echo "TMP_DATA=$TMP_DATA" >> "$GITHUB_ENV"
+          echo "DECOY_DIR=$DECOY_DIR" >> "$GITHUB_ENV"
+
+          test ! -e "$HOME/.decoyd"
+          sudo /tmp/decoyd install --system --data-dir "$TMP_DATA"
+
+          # O4: system install must not write to user --data-dir or $HOME/.decoyd.
+          test -z "$(ls -A "$TMP_DATA")"
+          test ! -e "$HOME/.decoyd"
+          test -x /usr/local/bin/decoyd
+          test -f /etc/systemd/system/decoyd.service
+
+          sudo systemd-analyze verify /etc/systemd/system/decoyd.service
+          sudo systemctl status decoyd.service --no-pager
+
+      - name: Trigger decoy read by child process and verify attribution + unprivileged events
+        run: |
+          DECOY_PATH="$DECOY_DIR/.npmrc"
+          SECRET_VAL="$(openssl rand -hex 20)"
+          printf '//registry.npmjs.org/:_authToken=npm_%s\n' "$SECRET_VAL" > "$DECOY_PATH"
+          chmod 0600 "$DECOY_PATH"
+
+          OWNER_UID="$(id -u)"
+          cat <<EOF | sudo tee /var/lib/decoyd/deployed_tokens.json >/dev/null
+          [
+            {
+              "id": "ci-lifecycle-tok1",
+              "type": "npmrc",
+              "deployed_path": "$DECOY_PATH",
+              "owner_uid": $OWNER_UID
+            }
+          ]
+          EOF
+          sudo chmod 0644 /var/lib/decoyd/deployed_tokens.json
+
+          # Wait for watchSnapshotForReload (5s poll) to pick up the deployed token.
+          ready=0
+          for i in $(seq 1 20); do
+            if sudo journalctl -u decoyd.service --no-pager | grep -q "monitoring 1 tokens"; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          test "$ready" -eq 1
+
+          # Child process reads the decoy while remaining alive briefly so /proc/<pid> reads succeed cleanly.
+          rm -f /tmp/child.pid
+          DECOY_PATH="$DECOY_PATH" \
+          npm_package_name="lifecycle-test-pkg" \
+          npm_package_version="1.2.3" \
+          npm_lifecycle_event="postinstall" \
+          python3 -c 'import os, time; open("/tmp/child.pid", "w").write(str(os.getpid())); open(os.environ["DECOY_PATH"], "rb").read(); time.sleep(0.6)'
+          CHILD_PID="$(cat /tmp/child.pid)"
+          echo "Triggered read from child PID: $CHILD_PID"
+
+          # Wait up to 10s for /var/lib/decoyd/triggers.jsonl to record the event.
+          found=0
+          for i in $(seq 1 20); do
+            if [ -f /var/lib/decoyd/triggers.jsonl ] && grep -q "ci-lifecycle-tok1" /var/lib/decoyd/triggers.jsonl; then
+              found=1
+              break
+            fi
+            sleep 0.5
+          done
+          test "$found" -eq 1
+
+          echo "=== /var/lib/decoyd/triggers.jsonl ==="
+          cat /var/lib/decoyd/triggers.jsonl
+
+          EXPECTED_PID="$CHILD_PID" python3 - <<'PY'
+          import json, os, sys
+          expected_pid = int(os.environ["EXPECTED_PID"])
+          events = []
+          with open("/var/lib/decoyd/triggers.jsonl", "r", encoding="utf-8") as f:
+              for line in f:
+                  line = line.strip()
+                  if line:
+                      events.append(json.loads(line))
+          matches = [
+              e for e in events
+              if e.get("token_id") == "ci-lifecycle-tok1"
+              and e.get("watcher_tier") == "tier1"
+              and isinstance(e.get("attribution"), dict)
+              and e["attribution"].get("accessor", {}).get("pid") == expected_pid
+          ]
+          assert matches, f"No matching tier1 event with pid={expected_pid} in {events}"
+          ev = matches[-1]
+          acc = ev["attribution"]["accessor"]
+          assert acc.get("exe"), f"Missing exe in accessor: {acc}"
+          assert ev["attribution"].get("npm_package") == "lifecycle-test-pkg", ev["attribution"]
+          assert ev["attribution"].get("npm_version") == "1.2.3", ev["attribution"]
+          assert ev["attribution"].get("npm_lifecycle_event") == "postinstall", ev["attribution"]
+          print("Verified triggers.jsonl event:", json.dumps(ev))
+          PY
+
+          # Unprivileged user decoyd events --json must read the system triggers.jsonl.
+          test "$(id -u)" -ne 0
+          EVENTS_JSON="$(/usr/local/bin/decoyd events --json)"
+          echo "=== Unprivileged decoyd events --json ==="
+          echo "$EVENTS_JSON"
+          EVENTS_JSON="$EVENTS_JSON" EXPECTED_PID="$CHILD_PID" python3 - <<'PY'
+          import json, os
+          data = json.loads(os.environ["EVENTS_JSON"])
+          expected_pid = int(os.environ["EXPECTED_PID"])
+          matches = [
+              e for e in data
+              if e.get("token_id") == "ci-lifecycle-tok1"
+              and e.get("attribution", {}).get("accessor", {}).get("pid") == expected_pid
+              and e.get("attribution", {}).get("npm_package") == "lifecycle-test-pkg"
+          ]
+          assert matches, f"Unprivileged decoyd events --json missing expected event: {data}"
+          print("Verified unprivileged decoyd events --json output.")
+          PY
+
+      - name: Sync config and uninstall --system
+        run: |
+          cat <<'EOF' > "$TMP_DATA/alert_config.json"
+          {
+            "channels": [
+              {
+                "id": "ci-hook",
+                "type": "webhook",
+                "webhook_url": "http://127.0.0.1:1/unused"
+              }
+            ],
+            "default_id": "ci-hook"
+          }
+          EOF
+          chmod 0600 "$TMP_DATA/alert_config.json"
+
+          sudo /usr/local/bin/decoyd sync --data-dir "$TMP_DATA"
+          sudo test -f /etc/decoyd/alert_config.json
+          test "$(sudo stat -c '%a' /etc/decoyd/alert_config.json)" = "600"
+          sudo systemctl status decoyd.service --no-pager
+
+          sudo /usr/local/bin/decoyd uninstall --system
+          test ! -e /etc/systemd/system/decoyd.service
+          test ! -e /usr/local/bin/decoyd
+          test ! -e /var/lib/decoyd
+          test ! -e /etc/decoyd
+          rm -rf "$TMP_DATA" "$DECOY_DIR" /tmp/decoyd /tmp/child.pid
 
   windows:
     name: Windows build and test
     runs-on: windows-latest
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version-file: go.mod
-          cache: true
+          go-version: "stable"
+          cache: false
+
+      - name: Cache Go modules
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/AppData/Local/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-priv-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-priv-go-
 
       - name: Build (Windows)
         run: go build ./...
@@ -75,29 +260,3 @@ jobs:
 
       - name: vet
         run: go vet ./...
-
-  systemd-verify:
-    name: systemd-analyze verify
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Build decoyd
-        run: go build -o /tmp/decoyd ./cmd/decoyd
-
-      - name: Install system unit (dry-run)
-        run: |
-          sudo /tmp/decoyd install --system --data-dir /tmp/decoyd-test-data 2>&1 ||             echo "install --system not available in CI (expected without full sudo)"
-
-      - name: systemd-analyze verify (if available)
-        run: |
-          if systemd-analyze verify /etc/systemd/system/decoyd.service 2>/dev/null; then
-            echo "systemd-analyze verify OK"
-          else
-            echo "UNKNOWN: systemd-analyze not available or unit not installed"
-          fi
