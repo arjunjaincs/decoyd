@@ -99,7 +99,7 @@ func cmdSelfTest(dataDir string) error {
 
 	// --- 6. Trigger: read the decoy ---
 	fmt.Println("  triggering read …")
-	if _, readErr := os.ReadFile(decoyPath); readErr != nil {
+	if _, readErr := os.ReadFile(decoyPath); readErr != nil { // #nosec G304 -- decoyPath is created in an isolated temp directory by selftest
 		return fmt.Errorf("selftest: read decoy: %w", readErr)
 	}
 

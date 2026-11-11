@@ -33,7 +33,7 @@ func cmdUninstall(dataDir string) error {
 	}
 
 	// Remove the unit file.
-	if err := os.Remove(unitPath); err != nil {
+	if err := os.Remove(unitPath); err != nil { // #nosec G703 -- unitPath is the internal systemd unit path, not user-controlled taint
 		if os.IsNotExist(err) {
 			fmt.Println("No unit file found at", unitPath, "(already removed?)")
 		} else {

@@ -18,7 +18,7 @@ func doctorPlatformChecks(add func(doctorResult)) {
 			if c == 0 {
 				break
 			}
-			b = append(b, byte(c))
+			b = append(b, byte(c)) // #nosec G115 -- uname.Release int8 elements are valid ASCII bytes
 		}
 		add(doctorResult{Check: "kernel", Status: "ok",
 			Message: "Linux " + string(b)})
@@ -51,7 +51,7 @@ func doctorFSType(path string) (string, error) {
 		return "unknown", err
 	}
 	// Common Linux magic numbers.
-	switch uint32(st.Type) {
+	switch uint32(st.Type) { // #nosec G115 -- Linux statfs magic numbers fit in uint32
 	case 0xEF53:
 		return "ext4", nil
 	case 0x9123683E:
@@ -73,6 +73,6 @@ func doctorFSType(path string) (string, error) {
 	case 0x2FC12FC1:
 		return "zfs", nil
 	default:
-		return fmt.Sprintf("0x%x", uint32(st.Type)), nil
+		return fmt.Sprintf("0x%x", uint32(st.Type)), nil // #nosec G115 -- Linux statfs magic numbers fit in uint32
 	}
 }
