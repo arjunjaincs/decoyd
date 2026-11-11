@@ -47,7 +47,7 @@ func cmdDoctor(dataDir string, args []string) error {
 	})
 
 	// --- Data directory ---
-	fi, err := os.Stat(dataDir)
+	fi, err := os.Stat(dataDir) // #nosec G703 -- dataDir is validated operator/user config directory
 	if err != nil {
 		add(doctorResult{Check: "data_dir", Status: "fail",
 			Message: "cannot access: " + err.Error()})
@@ -77,7 +77,7 @@ func cmdDoctor(dataDir string, args []string) error {
 
 	// --- Snapshot validity ---
 	snapPath := filepath.Join(dataDir, "deployed_tokens.json")
-	if _, snapErr := os.Stat(snapPath); os.IsNotExist(snapErr) {
+	if _, snapErr := os.Stat(snapPath); os.IsNotExist(snapErr) { // #nosec G703 -- snapPath is inside validated operator/user dataDir
 		add(doctorResult{Check: "snapshot", Status: "warn",
 			Message: "deployed_tokens.json not found — no tokens deployed yet or watcher not run"})
 	} else {

@@ -6,6 +6,8 @@ package main
 
 import "fmt"
 
+const systemTriggersDir = ""
+
 func cmdInstallSystem() error {
 	return fmt.Errorf("decoyd install --system is only supported on Linux")
 }

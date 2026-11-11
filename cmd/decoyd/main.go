@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"text/tabwriter"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -24,55 +26,176 @@ func main() {
 	}
 }
 
-func run(args []string) error {
-	// Resolve data directory first — needed by all subcommands.
-	dataDir, err := config.DataDir()
+func cleanExplicitDataDir(raw string) (string, error) {
+	if raw == "" || strings.ContainsRune(raw, 0) {
+		return "", fmt.Errorf("--data-dir requires a valid directory path")
+	}
+	cleaned := filepath.Clean(raw)
+	for _, part := range strings.Split(filepath.ToSlash(cleaned), "/") {
+		if part == ".." {
+			return "", fmt.Errorf("--data-dir must not contain '..' traversal segments: %q", raw)
+		}
+	}
+	abs, err := filepath.Abs(cleaned)
 	if err != nil {
-		return fmt.Errorf("cannot resolve config directory: %w", err)
+		return "", fmt.Errorf("--data-dir %q: %w", raw, err)
+	}
+	return abs, nil
+}
+
+func parseGlobalFlags(args []string) (dataDir string, explicit bool, rest []string, err error) {
+	rest = make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--data-dir":
+			i++
+			if i >= len(args) || args[i] == "" {
+				return "", false, nil, fmt.Errorf("--data-dir requires a directory argument")
+			}
+			abs, cerr := cleanExplicitDataDir(args[i])
+			if cerr != nil {
+				return "", false, nil, cerr
+			}
+			dataDir = abs
+			explicit = true
+		case strings.HasPrefix(a, "--data-dir="):
+			val := strings.TrimPrefix(a, "--data-dir=")
+			abs, cerr := cleanExplicitDataDir(val)
+			if cerr != nil {
+				return "", false, nil, cerr
+			}
+			dataDir = abs
+			explicit = true
+		default:
+			rest = append(rest, a)
+		}
+	}
+	return dataDir, explicit, rest, nil
+}
+
+// userDataDirPathNoCreate resolves the user's data directory path without
+// creating it on disk (used by read-only commands and O4-compliant flows).
+func userDataDirPathNoCreate() (string, error) {
+	if runtime.GOOS == "windows" {
+		base, err := os.UserConfigDir()
+		if err != nil {
+			return "", fmt.Errorf("cannot locate AppData directory: %w", err)
+		}
+		return filepath.Join(base, config.AppName), nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("cannot locate home directory: %w", err)
+	}
+	return filepath.Join(home, config.AppNameLower), nil
+}
+
+func ensureWritableDataDir(explicitDir string, explicit bool) (string, error) {
+	if !explicit {
+		return config.DataDir()
+	}
+	// #nosec G703 -- explicitDir is validated by cleanExplicitDataDir (operator CLI --data-dir flag)
+	if err := os.MkdirAll(explicitDir, 0o700); err != nil {
+		return "", fmt.Errorf("cannot create data directory %s: %w", explicitDir, err)
+	}
+	return explicitDir, nil
+}
+
+func run(args []string) error {
+	dataDir, explicitDir, rest, err := parseGlobalFlags(args)
+	if err != nil {
+		return err
 	}
 
-	// Commands that MUST NOT open the bbolt store (no exclusive lock).
-	// 'decoyd watch' runs as a persistent background service alongside the
-	// TUI; if it opened decoyd.db it would deadlock the next TUI launch.
-	if len(args) > 0 {
-		switch args[0] {
+	// Commands that MUST NOT open the bbolt store (no exclusive lock) and
+	// system/read-only commands that must not touch $HOME/.decoyd (O4).
+	if len(rest) > 0 {
+		switch rest[0] {
+		case "help", "--help", "-h":
+			printUsage()
+			return nil
+		case "install":
+			for _, a := range rest[1:] {
+				if a == "--system" {
+					// O4: system install never creates or writes $HOME/.decoyd or --data-dir.
+					return cmdInstallSystem()
+				}
+			}
+			writableDir, dErr := ensureWritableDataDir(dataDir, explicitDir)
+			if dErr != nil {
+				return dErr
+			}
+			return cmdInstall(writableDir)
+		case "uninstall":
+			for _, a := range rest[1:] {
+				if a == "--system" {
+					// O4: system uninstall never creates or writes $HOME/.decoyd or --data-dir.
+					return cmdUninstallSystem()
+				}
+			}
+			writableDir, dErr := ensureWritableDataDir(dataDir, explicitDir)
+			if dErr != nil {
+				return dErr
+			}
+			return cmdUninstall(writableDir)
+		case "sync":
+			srcDir := dataDir
+			if !explicitDir {
+				srcDir, err = userDataDirPathNoCreate()
+				if err != nil {
+					return fmt.Errorf("cannot resolve config directory: %w", err)
+				}
+			}
+			return cmdSync(srcDir)
 		case "watch":
 			tier1 := false
-			for _, a := range args[1:] {
+			for _, a := range rest[1:] {
 				if a == "--tier1" {
 					tier1 = true
 				}
 			}
-			return cmdWatch(dataDir, tier1)
-		case "install":
-			for _, a := range args[1:] {
-				if a == "--system" {
-					return cmdInstallSystem()
-				}
+			writableDir, dErr := ensureWritableDataDir(dataDir, explicitDir)
+			if dErr != nil {
+				return dErr
 			}
-			return cmdInstall(dataDir)
-		case "uninstall":
-			for _, a := range args[1:] {
-				if a == "--system" {
-					return cmdUninstallSystem()
-				}
-			}
-			return cmdUninstall(dataDir)
-		case "sync":
-			return cmdSync(dataDir)
+			return cmdWatch(writableDir, tier1)
 		case "triggers":
-			return cmdTriggers(dataDir)
+			writableDir, dErr := ensureWritableDataDir(dataDir, explicitDir)
+			if dErr != nil {
+				return dErr
+			}
+			return cmdTriggers(writableDir)
 		case "events":
-			return cmdEvents(dataDir, args[1:])
+			if explicitDir {
+				return cmdEvents(dataDir, rest[1:])
+			}
+			userDir, dErr := userDataDirPathNoCreate()
+			if dErr != nil {
+				return fmt.Errorf("cannot resolve config directory: %w", dErr)
+			}
+			return cmdEventsWithOptions(userDir, systemTriggersDir, true, rest[1:])
 		case "test":
-			return cmdSelfTest(dataDir)
+			writableDir, dErr := ensureWritableDataDir(dataDir, explicitDir)
+			if dErr != nil {
+				return dErr
+			}
+			return cmdSelfTest(writableDir)
 		case "doctor":
-			return cmdDoctor(dataDir, args[1:])
-		case "help", "--help", "-h":
-			printUsage()
-			return nil
+			writableDir, dErr := ensureWritableDataDir(dataDir, explicitDir)
+			if dErr != nil {
+				return dErr
+			}
+			return cmdDoctor(writableDir, rest[1:])
 		}
 	}
+
+	writableDir, err := ensureWritableDataDir(dataDir, explicitDir)
+	if err != nil {
+		return fmt.Errorf("cannot resolve config directory: %w", err)
+	}
+	dataDir = writableDir
+	args = rest
 
 	// All remaining commands open the bbolt store exclusively.
 	dbPath := filepath.Join(dataDir, "decoyd.db")
@@ -248,7 +371,7 @@ func cmdTriggers(dataDir string) error {
 }
 
 func printUsage() {
-	fmt.Print(`Usage: decoyd [command]
+	fmt.Print(`Usage: decoyd [--data-dir DIR] [command]
 
 Commands:
   (none)             Launch the interactive TUI
@@ -257,9 +380,9 @@ Commands:
   remove --purge <id> Delete a token record AND its deployed file from disk
   watch [--tier1]    Run the headless file watcher (alert on token access)
                      --tier1: require fanotify-based Tier 1 detection (Linux only)
-  install            Install decoyd watch as a system service (systemd on Linux,
-                     Task Scheduler on Windows)
-  uninstall          Remove the installed system service
+  install [--system] Install decoyd watch as a service (user mode or root Tier 1 systemd on Linux)
+  uninstall [--system] Remove the installed service (plus /var/lib/decoyd and /etc/decoyd with --system)
+  sync               Copy alert config one-way into /etc/decoyd/alert_config.json (Linux root)
   triggers           Print recent trigger events (alias; see events)
   events             Print trigger events with schema v1 fields
                      Flags: --json --since DURATION --token ID --limit N --fail-if-any

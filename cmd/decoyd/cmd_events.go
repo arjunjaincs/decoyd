@@ -1,8 +1,7 @@
 // cmd_events.go — "decoyd events" subcommand.
 //
 // Reads triggers.jsonl and formats events. Supports filtering by token,
-// time range, and streaming (--follow). Exit code 3 when --fail-if-any
-// and at least one event is present.
+// time range, and exit code 3 when --fail-if-any and at least one event exists.
 //
 // Schema version 1 adds watcher_tier and attribution fields (T5).
 // Old events (without these fields) load correctly due to json:",omitempty".
@@ -12,6 +11,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"sort"
 	"text/tabwriter"
 	"time"
 
@@ -22,8 +23,11 @@ import (
 const exitCodeEventsFound = 3
 
 // cmdEvents implements "decoyd events [--json] [--since DURATION] [--fail-if-any]".
-// It reads triggers.jsonl (no bbolt access) and formats events to stdout.
 func cmdEvents(dataDir string, args []string) error {
+	return cmdEventsWithOptions(dataDir, "", false, args)
+}
+
+func cmdEventsWithOptions(dataDir, systemDir string, includeSystem bool, args []string) error {
 	var (
 		jsonOut   bool
 		failIfAny bool
@@ -67,7 +71,7 @@ func cmdEvents(dataDir string, args []string) error {
 		}
 	}
 
-	events, err := triglog.Load(dataDir)
+	events, err := loadMergedEvents(dataDir, systemDir, includeSystem)
 	if err != nil {
 		return fmt.Errorf("load events: %w", err)
 	}
@@ -147,4 +151,39 @@ func cmdEvents(dataDir string, args []string) error {
 		os.Exit(exitCodeEventsFound)
 	}
 	return nil
+}
+
+func loadMergedEvents(dataDir, systemDir string, includeSystem bool) ([]triglog.TriggerEvent, error) {
+	var all []triglog.TriggerEvent
+	if dataDir != "" {
+		evs, lErr := triglog.Load(dataDir)
+		if lErr != nil {
+			return nil, lErr
+		}
+		all = append(all, evs...)
+	}
+	if includeSystem && systemDir != "" && filepath.Clean(systemDir) != filepath.Clean(dataDir) {
+		evs, lErr := triglog.Load(systemDir)
+		if lErr == nil {
+			all = append(all, evs...)
+		}
+	}
+	if len(all) <= 1 {
+		return all, nil
+	}
+	seen := make(map[string]bool, len(all))
+	dedup := make([]triglog.TriggerEvent, 0, len(all))
+	for _, e := range all {
+		if e.ID != "" {
+			if seen[e.ID] {
+				continue
+			}
+			seen[e.ID] = true
+		}
+		dedup = append(dedup, e)
+	}
+	sort.SliceStable(dedup, func(i, j int) bool {
+		return dedup[i].TriggeredAt.Before(dedup[j].TriggeredAt)
+	})
+	return dedup, nil
 }

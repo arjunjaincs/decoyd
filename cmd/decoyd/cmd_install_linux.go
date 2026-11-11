@@ -50,21 +50,12 @@ func cmdInstall(dataDir string) error {
 
 	// User systemd unit directory.
 	unitDir := filepath.Join(os.Getenv("HOME"), ".config", "systemd", "user")
-	// #nosec G703 -- unitDir is filepath.Join(HOME, ".config/systemd/user"): same
-	// reasoning as the OpenFile suppression below — HOME is the running user's own
-	// home directory, set by their login shell; not attacker-controlled.
-	if err := os.MkdirAll(unitDir, 0o700); err != nil {
+	if err := os.MkdirAll(unitDir, 0o700); err != nil { // #nosec G703 -- unitDir is $HOME/.config/systemd/user for user-scoped systemd unit
 		return fmt.Errorf("create systemd user dir: %w", err)
 	}
 	unitPath := filepath.Join(unitDir, "decoyd.service")
 
-	// #nosec G304 G703 -- unitPath is filepath.Join(HOME, ".config/systemd/user/decoyd.service"):
-	// the only variable component is HOME, which is set by the login shell of the
-	// owning user — the same user who runs 'decoyd install' to install a service for
-	// themselves. An attacker who can control HOME already has direct write access to
-	// ~/.config/systemd/user/ without decoyd's involvement. The filename component
-	// ("decoyd.service") is a hardcoded constant.
-	f, err := os.OpenFile(unitPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	f, err := os.OpenFile(unitPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600) // #nosec G304 G703 -- unitPath is $HOME/.config/systemd/user/decoyd.service with fixed filename
 	if err != nil {
 		return fmt.Errorf("write unit file: %w", err)
 	}

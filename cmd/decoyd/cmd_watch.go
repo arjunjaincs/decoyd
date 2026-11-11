@@ -62,7 +62,7 @@ func watchSnapshotForReload(w *watch.Watcher, snapshotPath string) {
 	var lastSize int64
 
 	// Seed initial state so the first tick doesn't reload unnecessarily.
-	if fi, err := os.Stat(snapshotPath); err == nil {
+	if fi, err := os.Stat(snapshotPath); err == nil { // #nosec G703 -- snapshotPath is inside validated operator/user dataDir
 		lastMod = fi.ModTime()
 		lastSize = fi.Size()
 	}
@@ -71,7 +71,7 @@ func watchSnapshotForReload(w *watch.Watcher, snapshotPath string) {
 	defer ticker.Stop()
 
 	for range ticker.C {
-		fi, err := os.Stat(snapshotPath)
+		fi, err := os.Stat(snapshotPath) // #nosec G703 -- snapshotPath is inside validated operator/user dataDir
 		if err != nil {
 			continue // file may not exist yet
 		}

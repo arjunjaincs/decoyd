@@ -44,7 +44,7 @@ func cmdUninstall(dataDir string) error {
 	}
 
 	// Reload systemd so the removed unit is gone from its internal state.
-	cmd := exec.Command("systemctl", "--user", "daemon-reload") // #nosec G204 -- fixed
+	cmd := exec.Command("systemctl", "--user", "daemon-reload") // #nosec G204 -- fixed systemctl --user daemon-reload arguments
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
