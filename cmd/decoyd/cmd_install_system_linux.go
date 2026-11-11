@@ -142,7 +142,7 @@ func cmdSync(userDataDir string) error {
 	defer src.Close()
 
 	// Write to /etc/decoyd/alerts.json with 0600 (root-only readable).
-	dst, err := os.OpenFile(systemAlertConfig, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600) // #nosec G304
+	dst, err := os.OpenFile(systemAlertConfig, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600) // #nosec G304 -- systemAlertConfig is a constant root-owned /etc path
 	if err != nil {
 		return fmt.Errorf("write %s: %w", systemAlertConfig, err)
 	}

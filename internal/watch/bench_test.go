@@ -76,12 +76,14 @@ func BenchmarkInotifyOpenReadClose(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		f, err := os.Open(tokenPath) // #nosec G304 — test-generated path in TempDir
+		f, err := os.Open(tokenPath) // #nosec G304 -- test-generated path in b.TempDir()
 		if err != nil {
 			b.Fatal(err)
 		}
 		buf := make([]byte, 64)
-		f.Read(buf) //nolint:errcheck // benchmark: we just want the syscall overhead
-		f.Close()
+		if _, err := f.Read(buf); err != nil {
+			b.Fatal(err)
+		}
+		_ = f.Close()
 	}
 }

@@ -10,7 +10,10 @@ import (
 	"fmt"
 	"go/scanner"
 	"go/token"
+	"math"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -24,8 +27,10 @@ func TestNoFANPERMConstants(t *testing.T) {
 		"fanotify_linux.go",
 		"hybrid_linux.go",
 	}
+	_, thisFile, _, _ := runtime.Caller(0)
+	pkgDir := filepath.Dir(thisFile)
 	for _, file := range files {
-		src, err := os.ReadFile(file)
+		src, err := os.ReadFile(filepath.Join(pkgDir, file))
 		if err != nil {
 			t.Fatalf("open %s: %v", file, err)
 		}
@@ -233,8 +238,10 @@ func TestFanotifySource_NoPERMConstants(t *testing.T) {
 		"FAN_OPEN_EXEC_PERM",
 	}
 	files := []string{"fanotify_linux.go", "hybrid_linux.go"}
+	_, thisFile, _, _ := runtime.Caller(0)
+	pkgDir := filepath.Dir(thisFile)
 	for _, fname := range files {
-		data, err := os.ReadFile(fname)
+		data, err := os.ReadFile(filepath.Join(pkgDir, fname))
 		if err != nil {
 			t.Fatalf("read %s: %v", fname, err)
 		}
@@ -289,5 +296,62 @@ func TestFanotifyDebounceKey(_ *testing.T) {
 	}
 	if m[k3] {
 		panic("different keys must not collide")
+	}
+}
+
+func TestParseFanotifyBoundsAndOverflow(t *testing.T) {
+	// FAN_NOFD (0xFFFFFFFF -> -1) must be accepted cleanly.
+	if fd, ok := parseFanotifyFD(0xFFFFFFFF); !ok || fd != -1 {
+		t.Fatalf("parseFanotifyFD(0xFFFFFFFF) = (%d, %v); want (-1, true)", fd, ok)
+	}
+	// math.MaxInt32 must be accepted; math.MaxInt32+1 must be rejected.
+	if fd, ok := parseFanotifyFD(math.MaxInt32); !ok || fd != math.MaxInt32 {
+		t.Fatalf("parseFanotifyFD(MaxInt32) = (%d, %v); want (MaxInt32, true)", fd, ok)
+	}
+	if fd, ok := parseFanotifyFD(uint32(math.MaxInt32) + 1); ok {
+		t.Fatalf("parseFanotifyFD(MaxInt32+1) = (%d, true); want false", fd)
+	}
+	if pid, ok := parseFanotifyPID(math.MaxInt32); !ok || pid != math.MaxInt32 {
+		t.Fatalf("parseFanotifyPID(MaxInt32) = (%d, %v); want (MaxInt32, true)", pid, ok)
+	}
+	if pid, ok := parseFanotifyPID(uint32(math.MaxInt32) + 1); ok {
+		t.Fatalf("parseFanotifyPID(MaxInt32+1) = (%d, true); want false", pid)
+	}
+	if _, ok := safeIntToInt32(-1); ok {
+		t.Fatal("safeIntToInt32(-1) = true; want false")
+	}
+	if v, ok := safeIntToInt32(42); !ok || v != 42 {
+		t.Fatalf("safeIntToInt32(42) = (%d, %v); want (42, true)", v, ok)
+	}
+	// When uint64 math.MaxInt32 < int on 64-bit, check upper bound.
+	bigVal := math.MaxInt32 + 1
+	if _, ok := safeIntToInt32(bigVal); ok {
+		t.Fatalf("safeIntToInt32(%d) = true; want false", bigVal)
+	}
+
+	// Overflows in raw event buffer must reject the event and still close valid FDs.
+	pipeFDs := make([]int, 2)
+	if err := unix.Pipe(pipeFDs); err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	defer unix.Close(pipeFDs[1])
+	readFD := pipeFDs[0]
+	// Build event with valid readFD and overflowing PID (0x80000000).
+	buf := make([]byte, fanotifyMetadataSize)
+	binary.LittleEndian.PutUint32(buf[0:4], fanotifyMetadataSize)
+	buf[4] = fanotifyMetadataVersion
+	binary.LittleEndian.PutUint16(buf[6:8], uint16(fanotifyMetadataSize))
+	binary.LittleEndian.PutUint64(buf[8:16], unix.FAN_OPEN)
+	binary.LittleEndian.PutUint32(buf[16:20], uint32(readFD))
+	binary.LittleEndian.PutUint32(buf[20:24], uint32(0x80000000))
+
+	events, overflow := parseFanotifyEvents(buf)
+	if overflow || len(events) != 0 {
+		t.Fatalf("got events=%d overflow=%v; want 0, false", len(events), overflow)
+	}
+	var st unix.Stat_t
+	if err := unix.Fstat(readFD, &st); err == nil {
+		_ = unix.Close(readFD)
+		t.Fatal("fd should have been closed when PID overflowed")
 	}
 }

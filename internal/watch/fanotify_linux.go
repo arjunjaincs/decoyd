@@ -17,6 +17,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"syscall"
 	"time"
@@ -61,6 +62,37 @@ type fanotifyEvent struct {
 // ALWAYS closes eventFD (even on parse error or overflow).
 // Never reads out of bounds.
 // Returns parsed events and whether a Q_OVERFLOW was detected.
+// parseFanotifyFD converts a uint32 kernel metadata fd field to signed int32
+// with explicit bounds checking. 0xFFFFFFFF encodes FAN_NOFD (-1). Values above
+// math.MaxInt32 other than FAN_NOFD are rejected as malformed.
+func parseFanotifyFD(raw uint32) (int32, bool) {
+	if raw == 0xFFFFFFFF {
+		return -1, true
+	}
+	if raw > math.MaxInt32 {
+		return -1, false
+	}
+	return int32(raw), true
+}
+
+// parseFanotifyPID converts a uint32 kernel metadata pid field to signed int32
+// with explicit overflow bounds checking.
+func parseFanotifyPID(raw uint32) (int32, bool) {
+	if raw > math.MaxInt32 {
+		return 0, false
+	}
+	return int32(raw), true
+}
+
+// safeIntToInt32 converts a non-negative int (e.g. fd or pid) to int32 with
+// explicit bounds checks.
+func safeIntToInt32(v int) (int32, bool) {
+	if v < 0 || v > math.MaxInt32 {
+		return -1, false
+	}
+	return int32(v), true
+}
+
 func parseFanotifyEvents(buf []byte) (events []fanotifyEvent, overflow bool) {
 	offset := 0
 	for offset+fanotifyMetadataSize <= len(buf) {
@@ -79,15 +111,27 @@ func parseFanotifyEvents(buf []byte) (events []fanotifyEvent, overflow bool) {
 		}
 
 		mask := binary.LittleEndian.Uint64(buf[offset+8 : offset+16])
-		fd := int32(binary.LittleEndian.Uint32(buf[offset+16 : offset+20]))  // #nosec G115 -- fanotify metadata fd is signed int32 in kernel struct
-		pid := int32(binary.LittleEndian.Uint32(buf[offset+20 : offset+24])) // #nosec G115 -- fanotify metadata pid is signed int32 in kernel struct
+		rawFD := binary.LittleEndian.Uint32(buf[offset+16 : offset+20])
+		rawPID := binary.LittleEndian.Uint32(buf[offset+20 : offset+24])
+
+		fd, fdOK := parseFanotifyFD(rawFD)
+		pid, pidOK := parseFanotifyPID(rawPID)
 
 		if mask&unix.FAN_Q_OVERFLOW != 0 {
 			// Overflow — close fd if valid.
-			if fd >= 0 {
+			if fdOK && fd >= 0 {
 				_ = unix.Close(int(fd))
 			}
 			overflow = true
+			offset += eventLen
+			continue
+		}
+
+		if !fdOK || !pidOK {
+			// Out-of-bounds/malformed fd or pid — close valid fd if any and skip.
+			if fdOK && fd >= 0 {
+				_ = unix.Close(int(fd))
+			}
 			offset += eventLen
 			continue
 		}
@@ -150,11 +194,19 @@ func newFanotifyWatcher() (*fanotifyWatcher, error) {
 		return nil, fmt.Errorf("fanotify stop pipe: %w", err)
 	}
 
+	ownPID, ok := safeIntToInt32(os.Getpid())
+	if !ok {
+		_ = unix.Close(fd)
+		_ = unix.Close(pipefd[0])
+		_ = unix.Close(pipefd[1])
+		return nil, fmt.Errorf("fanotify init: pid exceeds int32 range")
+	}
+
 	return &fanotifyWatcher{
 		fanFD:        fd,
 		stopR:        pipefd[0],
 		stopW:        pipefd[1],
-		ownPID:       int32(os.Getpid()), // #nosec G115 -- Linux pid_t fits in int32
+		ownPID:       ownPID,
 		tokenMap:     make(fanotifyTokenMap),
 		failedTokens: make(map[string]string),
 	}, nil
@@ -365,9 +417,14 @@ func (fw *fanotifyWatcher) runFanotifyLoop(dispatch func(tok DeployedToken, pid 
 	cleanupTicker := time.NewTicker(10 * time.Second)
 	defer cleanupTicker.Stop()
 
+	fanFD32, okFan := safeIntToInt32(fw.fanFD)
+	stopR32, okStop := safeIntToInt32(fw.stopR)
+	if !okFan || !okStop {
+		return
+	}
 	pollfds := []unix.PollFd{
-		{Fd: int32(fw.fanFD), Events: unix.POLLIN}, // #nosec G115 -- Linux fd fits in int32
-		{Fd: int32(fw.stopR), Events: unix.POLLIN}, // #nosec G115 -- Linux fd fits in int32
+		{Fd: fanFD32, Events: unix.POLLIN},
+		{Fd: stopR32, Events: unix.POLLIN},
 	}
 
 	for {

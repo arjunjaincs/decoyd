@@ -290,38 +290,55 @@ func TestGenerateDNSCanary_LabelUniqueness(t *testing.T) {
 
 // ── Fingerprint denylist ─────────────────────────────────────────────────────
 
+// highEntropyRE strips runs of 16+ base64/alphanumeric chars — these are random
+// values that cannot be banned from templates (Rule 12 applies to template text,
+// not to random entropy values).
+var highEntropyRE = regexp.MustCompile(`[A-Za-z0-9+/=]{16,}`)
+
+var denylistExactPhrases = []string{
+	"decoyd",
+	"decoy",
+	"canary",
+	"# Create a DNS",
+	"# Label:",
+	"Decoyd will",
+	"dns_canary",
+}
+
+var denylistWordPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)\bfake\b`),
+	regexp.MustCompile(`(?i)\bexample\b`),
+}
+
+// findStaticIdentifier checks value (after stripping 16+ char high-entropy runs)
+// and filename against Rule 12 banned terms. Returns the matching rule and true
+// if a forbidden identifier was found.
+func findStaticIdentifier(value, filename string) (string, bool) {
+	structural := highEntropyRE.ReplaceAllString(value, "")
+	for _, phrase := range denylistExactPhrases {
+		lo := strings.ToLower(phrase)
+		if strings.Contains(strings.ToLower(structural), lo) {
+			return "value contains " + phrase, true
+		}
+		if strings.Contains(strings.ToLower(filename), lo) {
+			return "filename contains " + phrase, true
+		}
+	}
+	for _, re := range denylistWordPatterns {
+		if re.MatchString(structural) {
+			return "value matches " + re.String(), true
+		}
+		if re.MatchString(filename) {
+			return "filename matches " + re.String(), true
+		}
+	}
+	return "", false
+}
+
 // TestNoStaticIdentifiers generates 200 tokens of every type and fails if any
 // token value or filename matches the denylist of static identifiers.
 // Rule 12: NO static identifiers ("decoyd", "canary", "decoy" etc.) in generated files.
-//
-// High-entropy random values (16+ consecutive base64/alphanumeric chars) are stripped
-// before checking the denylist — the check applies to structural/template text only,
-// not to cryptographically random values that could accidentally spell a word.
-// Use -count=200 to get enough samples to catch accidental template leakage.
 func TestNoStaticIdentifiers(t *testing.T) {
-	// highEntropyRE strips runs of 16+ base64/alphanumeric chars — these are random
-	// values that cannot be banned from templates (Rule 12 applies to template text,
-	// not to random entropy values). After stripping, the remaining structural text
-	// (labels, comments, format strings, YAML keys) must not contain banned phrases.
-	highEntropyRE := regexp.MustCompile(`[A-Za-z0-9+/=_\-]{16,}`)
-
-	// exactPhrases must NOT appear in structural text (case-insensitive substring match).
-	exactPhrases := []string{
-		"decoy",
-		"canary",
-		"decoyd",
-		"# Create a DNS",
-		"# Label:",
-		"Decoyd will",
-		"dns_canary",
-	}
-
-	// wordPatterns must NOT appear as whole words in structural text.
-	wordPatterns := []*regexp.Regexp{
-		regexp.MustCompile(`(?i)\bfake\b`),
-		regexp.MustCompile(`(?i)\bexample\b`),
-	}
-
 	allTypes := []string{
 		tokens.TypeAWSCredentials,
 		tokens.TypeSSHKey,
@@ -337,8 +354,6 @@ func TestNoStaticIdentifiers(t *testing.T) {
 		tokens.TypeDockerConfig,
 		tokens.TypeGitCredentials,
 		tokens.TypeNetrc,
-		// TypeRSAKey excluded: RSA-2048 keygen is too slow for 200x sampling
-		// TypeGCPServiceAccount excluded: RSA-2048 keygen is too slow for 200x
 		tokens.TypeTerraformCreds,
 		tokens.TypeVaultToken,
 		tokens.TypeMCPConfig,
@@ -351,29 +366,44 @@ func TestNoStaticIdentifiers(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Generate(%q) #%d error: %v", tt, i, err)
 			}
-			// Strip high-entropy runs before denylist check.
-			structural := highEntropyRE.ReplaceAllString(tok.Value, "")
-			for _, phrase := range exactPhrases {
-				lo := strings.ToLower(phrase)
-				if strings.Contains(strings.ToLower(structural), lo) {
-					t.Errorf("type=%s token[%d] structural text contains banned phrase %q (stripped excerpt: %.120q)",
-						tt, i, phrase, structural)
-				}
-				if strings.Contains(strings.ToLower(tok.Filename), lo) {
-					t.Errorf("type=%s token[%d] Filename=%q contains banned phrase %q",
-						tt, i, tok.Filename, phrase)
-				}
+			if reason, bad := findStaticIdentifier(tok.Value, tok.Filename); bad {
+				t.Errorf("type=%s token[%d] failed denylist: %s", tt, i, reason)
 			}
-			for _, re := range wordPatterns {
-				if re.MatchString(structural) {
-					t.Errorf("type=%s token[%d] structural text matches banned word pattern %q (stripped excerpt: %.120q)",
-						tt, i, re.String(), structural)
-				}
-				if re.MatchString(tok.Filename) {
-					t.Errorf("type=%s token[%d] Filename=%q matches banned word pattern %q",
-						tt, i, tok.Filename, re.String())
-				}
-			}
+		}
+	}
+
+	// Verify slow RSA-2048 types against Rule 12 as well.
+	for _, tt := range []string{tokens.TypeRSAKey, tokens.TypeGCPServiceAccount} {
+		tok, err := tokens.Generate(tt)
+		if err != nil {
+			t.Fatalf("Generate(%q) error: %v", tt, err)
+		}
+		if reason, bad := findStaticIdentifier(tok.Value, tok.Filename); bad {
+			t.Errorf("type=%s failed denylist: %s", tt, reason)
+		}
+	}
+}
+
+// TestNoStaticIdentifiers_CatchesBadTemplates proves the entropy-stripped denylist
+// still catches banned identifiers embedded directly in template text alongside
+// high-entropy random secret strings.
+func TestNoStaticIdentifiers_CatchesBadTemplates(t *testing.T) {
+	badTemplates := []struct {
+		word string
+		body string
+	}{
+		{"decoyd", "API_TOKEN=AbCdEfGhIjKlMnOpQrStUvWxYz012345\n# decoyd monitor\n"},
+		{"canary", "SECRET=AbCdEfGhIjKlMnOpQrStUvWxYz012345\nuser: canary_svc\n"},
+		{"decoy", "KEY=AbCdEfGhIjKlMnOpQrStUvWxYz012345\n# decoy credential\n"},
+		{"fake", "TOKEN=AbCdEfGhIjKlMnOpQrStUvWxYz012345\nhost = fake-db.internal\n"},
+		{"example", "HOST=example.internal\nPASS=AbCdEfGhIjKlMnOpQrStUvWxYz012345\n"},
+	}
+	for _, tc := range badTemplates {
+		reason, bad := findStaticIdentifier(tc.body, ".env")
+		if !bad {
+			t.Errorf("denylist failed to catch banned word %q in template %q", tc.word, tc.body)
+		} else {
+			t.Logf("caught %q (%s)", tc.word, reason)
 		}
 	}
 }

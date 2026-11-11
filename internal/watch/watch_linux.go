@@ -379,7 +379,7 @@ func (w *linuxWatcher) eventLoop(mask uint32) {
 							w.wdMu.Lock()
 							for fileWd, fileTok := range w.wdMap {
 								if fileTok.DeployedPath == fullPath {
-									_, _ = unix.InotifyRmWatch(w.inoFD, uint32(fileWd)) // #nosec G115
+									_, _ = unix.InotifyRmWatch(w.inoFD, uint32(fileWd)) // #nosec G115 -- fileWd is an active wdMap key returned positive by InotifyAddWatch
 									delete(w.wdMap, fileWd)
 									break
 								}
@@ -834,7 +834,7 @@ func (w *linuxWatcher) reload() error {
 	// Remove watches for directories no longer in the token list.
 	for dirWd, dp := range w.dirWdMap {
 		if _, stillExists := newDirTokens[dp]; !stillExists {
-			_, _ = unix.InotifyRmWatch(inoFD, uint32(dirWd)) // #nosec G115
+			_, _ = unix.InotifyRmWatch(inoFD, uint32(dirWd)) // #nosec G115 -- dirWd is an active dirWdMap key returned positive by InotifyAddWatch
 			delete(w.dirWdMap, dirWd)
 			delete(w.dirTokens, dp)
 		}

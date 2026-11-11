@@ -5,74 +5,108 @@ package main
 import (
 	"fmt"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
+
+// releaseFromUtsname converts [65]int8Release to string with explicit byte bounds checks.
+func releaseFromUtsname(rel [65]int8) string {
+	b := make([]byte, 0, len(rel))
+	for _, c := range rel {
+		if c == 0 {
+			break
+		}
+		if c < 0 {
+			// Non-ASCII byte; ignore to avoid signed-to-unsigned truncation issues.
+			continue
+		}
+		b = append(b, byte(c))
+	}
+	return string(b)
+}
+
+// fsTypeFromMagic maps Linux statfs magic numbers without integer narrowing.
+func fsTypeFromMagic(magic int64) string {
+	switch magic {
+	case 0xEF53:
+		return "ext4"
+	case 0x9123683E:
+		return "btrfs"
+	case 0x01021994:
+		return "tmpfs"
+	case 0x6969:
+		return "nfs"
+	case 0x65735546:
+		return "fuse"
+	case 0x01021997:
+		return "v9fs" // 9p
+	case 0x794C7630:
+		return "overlayfs"
+	case 0x58465342:
+		return "xfs"
+	case 0x4244:
+		return "hfs"
+	case 0x2FC12FC1:
+		return "zfs"
+	default:
+		return fmt.Sprintf("0x%x", magic)
+	}
+}
 
 // doctorPlatformChecks adds Linux-specific checks: kernel version, inotify
 // availability, and detection tier.
 func doctorPlatformChecks(add func(doctorResult)) {
 	var uname syscall.Utsname
 	if err := syscall.Uname(&uname); err == nil {
-		// Convert [65]int8 to string.
-		b := make([]byte, 0, 65)
-		for _, c := range uname.Release {
-			if c == 0 {
-				break
-			}
-			b = append(b, byte(c)) // #nosec G115 -- uname.Release int8 elements are valid ASCII bytes
-		}
 		add(doctorResult{Check: "kernel", Status: "ok",
-			Message: "Linux " + string(b)})
+			Message: "Linux " + releaseFromUtsname(uname.Release)})
 	} else {
 		add(doctorResult{Check: "kernel", Status: "warn",
 			Message: "uname failed: " + err.Error()})
 	}
 
-	// Inotify probe: open /proc/sys/fs/inotify/max_user_watches.
-	// If that file exists inotify is available in the kernel.
-	add(doctorResult{
-		Check:   "inotify",
-		Status:  "ok",
-		Message: "available (tier 1: file read/write events, no privilege required)",
-	})
+	// Inotify probe (Tier 2 fallback).
+	if fd, err := unix.InotifyInit1(unix.IN_CLOEXEC); err == nil {
+		_ = unix.Close(fd)
+		add(doctorResult{
+			Check:   "inotify",
+			Status:  "ok",
+			Message: "available (Tier 2: file read/write events, no privilege required)",
+		})
+	} else {
+		add(doctorResult{
+			Check:   "inotify",
+			Status:  "fail",
+			Message: "unavailable: " + err.Error(),
+		})
+	}
 
-	// Fanotify note (always a warn — requires CAP_SYS_ADMIN or root).
-	add(doctorResult{
-		Check:   "fanotify",
-		Status:  "warn",
-		Message: "needs root or CAP_SYS_ADMIN (tier 2, not enabled by default)",
-	})
+	// Fanotify probe (Tier 1 primary).
+	if fd, err := unix.FanotifyInit(
+		unix.FAN_CLASS_NOTIF|unix.FAN_CLOEXEC|unix.FAN_NONBLOCK,
+		uint(unix.O_RDONLY|unix.O_LARGEFILE|unix.O_CLOEXEC),
+	); err == nil {
+		_ = unix.Close(fd)
+		add(doctorResult{
+			Check:   "fanotify",
+			Status:  "ok",
+			Message: "available (Tier 1: fanotify FAN_CLASS_NOTIF with PID attribution)",
+		})
+	} else {
+		add(doctorResult{
+			Check:   "fanotify",
+			Status:  "warn",
+			Message: fmt.Sprintf("unavailable (%v) — needs root or CAP_SYS_ADMIN for Tier 1; Tier 2 inotify active", err),
+		})
+	}
 }
 
 // doctorFSType returns the filesystem type name for the path's mount.
-// Uses statfs(2).  Returns "unknown" on error.
+// Uses statfs(2). Returns "unknown" on error.
 func doctorFSType(path string) (string, error) {
 	var st syscall.Statfs_t
 	if err := syscall.Statfs(path, &st); err != nil {
 		return "unknown", err
 	}
-	// Common Linux magic numbers.
-	switch uint32(st.Type) { // #nosec G115 -- Linux statfs magic numbers fit in uint32
-	case 0xEF53:
-		return "ext4", nil
-	case 0x9123683E:
-		return "btrfs", nil
-	case 0x01021994:
-		return "tmpfs", nil
-	case 0x6969:
-		return "nfs", nil
-	case 0x65735546:
-		return "fuse", nil
-	case 0x01021997:
-		return "v9fs", nil // 9p
-	case 0x794C7630:
-		return "overlayfs", nil
-	case 0x58465342:
-		return "xfs", nil
-	case 0x4244:
-		return "hfs", nil
-	case 0x2FC12FC1:
-		return "zfs", nil
-	default:
-		return fmt.Sprintf("0x%x", uint32(st.Type)), nil // #nosec G115 -- Linux statfs magic numbers fit in uint32
-	}
+	return fsTypeFromMagic(int64(st.Type)), nil
 }
