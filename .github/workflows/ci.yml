@@ -190,7 +190,7 @@ jobs:
         run: gosec -severity medium -confidence medium -exclude G107 ./...
 
       - name: Install staticcheck
-        run: go install honnef.co/go/tools/cmd/staticcheck@2025.1.1
+        run: go install honnef.co/go/tools/cmd/staticcheck@latest
 
       - name: Run staticcheck
         run: staticcheck ./...

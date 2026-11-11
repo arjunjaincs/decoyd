@@ -25,7 +25,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: "stable"
           cache: true
 
       - name: Build
@@ -43,7 +43,7 @@ jobs:
 
       - name: staticcheck
         run: |
-          go install honnef.co/go/tools/cmd/staticcheck@2025.1.1
+          go install honnef.co/go/tools/cmd/staticcheck@latest
           staticcheck ./...
 
       - name: gosec
