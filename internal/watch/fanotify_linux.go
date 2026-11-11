@@ -22,8 +22,6 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
-
-	"github.com/arjunjaincs/decoyd/internal/attribution"
 )
 
 // fanotify metadata event structure size (struct fanotify_event_metadata).
@@ -51,13 +49,6 @@ const fanotifyMetadataVersion = 3
 // FAN_Q_OVERFLOW      = 0x00004000
 // FAN_MARK_ADD        = 0x00000001
 // FAN_MARK_INODE      = 0x00000000  (default; no extra flag needed)
-
-// tokenMark holds the (dev, ino) → token mapping for fanotify inode marks.
-type tokenMark struct {
-	dev uint64
-	ino uint64
-	tok DeployedToken
-}
 
 // fanotifyEvent is the parsed result of one fanotify metadata record.
 type fanotifyEvent struct {
@@ -88,8 +79,8 @@ func parseFanotifyEvents(buf []byte) (events []fanotifyEvent, overflow bool) {
 		}
 
 		mask := binary.LittleEndian.Uint64(buf[offset+8 : offset+16])
-		fd := int32(binary.LittleEndian.Uint32(buf[offset+16 : offset+20]))
-		pid := int32(binary.LittleEndian.Uint32(buf[offset+20 : offset+24]))
+		fd := int32(binary.LittleEndian.Uint32(buf[offset+16 : offset+20]))  // #nosec G115 -- fanotify metadata fd is signed int32 in kernel struct
+		pid := int32(binary.LittleEndian.Uint32(buf[offset+20 : offset+24])) // #nosec G115 -- fanotify metadata pid is signed int32 in kernel struct
 
 		if mask&unix.FAN_Q_OVERFLOW != 0 {
 			// Overflow — close fd if valid.
@@ -163,7 +154,7 @@ func newFanotifyWatcher() (*fanotifyWatcher, error) {
 		fanFD:        fd,
 		stopR:        pipefd[0],
 		stopW:        pipefd[1],
-		ownPID:       int32(os.Getpid()),
+		ownPID:       int32(os.Getpid()), // #nosec G115 -- Linux pid_t fits in int32
 		tokenMap:     make(fanotifyTokenMap),
 		failedTokens: make(map[string]string),
 	}, nil
@@ -344,9 +335,8 @@ type fanotifyDebounceKey struct {
 
 // fanotifyPidSet collects up to 5 distinct pids per debounce window.
 type fanotifyPidSet struct {
-	pids      [5]int32
-	count     int
-	processes [5]*attribution.Attribution // lazily populated
+	pids  [5]int32
+	count int
 }
 
 func (s *fanotifyPidSet) add(pid int32) bool {
@@ -376,8 +366,8 @@ func (fw *fanotifyWatcher) runFanotifyLoop(dispatch func(tok DeployedToken, pid 
 	defer cleanupTicker.Stop()
 
 	pollfds := []unix.PollFd{
-		{Fd: int32(fw.fanFD), Events: unix.POLLIN},
-		{Fd: int32(fw.stopR), Events: unix.POLLIN},
+		{Fd: int32(fw.fanFD), Events: unix.POLLIN}, // #nosec G115 -- Linux fd fits in int32
+		{Fd: int32(fw.stopR), Events: unix.POLLIN}, // #nosec G115 -- Linux fd fits in int32
 	}
 
 	for {

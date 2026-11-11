@@ -11,7 +11,6 @@ import (
 	"go/scanner"
 	"go/token"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -291,9 +290,4 @@ func TestFanotifyDebounceKey(_ *testing.T) {
 	if m[k3] {
 		panic("different keys must not collide")
 	}
-}
-
-// helper: resolve path relative to the package source dir
-func sourceFile(name string) string {
-	return filepath.Join(".", name)
 }

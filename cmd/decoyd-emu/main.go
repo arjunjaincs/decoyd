@@ -55,7 +55,7 @@ func main() {
 	}
 
 	for _, p := range paths {
-		info, err := os.Lstat(p)
+		info, err := os.Lstat(p) // #nosec G703 -- benign test tool reading user-specified path
 		if os.IsNotExist(err) {
 			fmt.Printf("%-55s (not found)\n", filepath.Base(p))
 			continue
@@ -70,7 +70,7 @@ func main() {
 		}
 		// Read the file to trigger a file-access event (open + read).
 		// We discard the contents immediately — no data is stored or sent.
-		data, err := os.ReadFile(p) // #nosec G304 — path is user-supplied or a known default
+		data, err := os.ReadFile(p) // #nosec G703 G304 -- benign test tool reading user-specified path
 		if err != nil {
 			fmt.Printf("%-55s (read error: %v)\n", filepath.Base(p), err)
 			continue

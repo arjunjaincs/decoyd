@@ -16,12 +16,6 @@ type watcherImpl interface {
 	reload() error
 }
 
-// newImpl constructs the platform-specific implementation.
-// Implemented in watch_linux.go and watch_windows.go.
-func newImpl(st *store.Store, dataDir string) (watcherImpl, error) {
-	return newPlatformImpl(st, dataDir)
-}
-
 // newImplWithOptions constructs the platform-specific implementation with options.
 // Implemented in hybrid_linux.go (Linux) and watch_windows.go (Windows, options ignored).
 func newImplWithOptions(st *store.Store, dataDir string, opts WatchOptions) (watcherImpl, error) {

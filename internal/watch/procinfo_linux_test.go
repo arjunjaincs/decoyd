@@ -16,10 +16,6 @@ import (
 
 // helpers ----------------------------------------------------------------
 
-func procDir(root string, pid int) string {
-	return filepath.Join(root, strconv.Itoa(pid))
-}
-
 func mkProcDir(t *testing.T, root string, pid int) string {
 	t.Helper()
 	dir := filepath.Join(root, strconv.Itoa(pid))

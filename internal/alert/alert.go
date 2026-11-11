@@ -219,7 +219,19 @@ const configFileName = "alert_config.json"
 // subsequent calls return the same IDs without the caller needing to Save.
 func Load(dataDir string) (AlertConfig, error) {
 	path := filepath.Join(dataDir, configFileName)
-	data, err := os.ReadFile(path) // #nosec G304 -- path is always filepath.Join(dataDir, configFileName), never user input
+	var data []byte
+	var err error
+	for attempt := 0; attempt < 25; attempt++ {
+		data, err = os.ReadFile(path) // #nosec G304 -- path is always filepath.Join(dataDir, configFileName), never user input
+		if err == nil || errors.Is(err, os.ErrNotExist) {
+			break
+		}
+		if runtime.GOOS == "windows" {
+			time.Sleep(time.Duration(attempt+1) * 5 * time.Millisecond)
+			continue
+		}
+		break
+	}
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return AlertConfig{}, nil
@@ -317,9 +329,21 @@ func Save(dataDir string, cfg AlertConfig) error {
 		// Belt-and-suspenders: WriteFile honours umask so we chmod explicitly.
 		_ = os.Chmod(tmp, 0o600)
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	var renameErr error
+	for attempt := 0; attempt < 25; attempt++ {
+		renameErr = os.Rename(tmp, path)
+		if renameErr == nil {
+			break
+		}
+		if runtime.GOOS == "windows" {
+			time.Sleep(time.Duration(attempt+1) * 10 * time.Millisecond)
+			continue
+		}
+		break
+	}
+	if renameErr != nil {
 		_ = os.Remove(tmp)
-		return fmt.Errorf("install alert config: %w", err)
+		return fmt.Errorf("install alert config: %w", renameErr)
 	}
 	return nil
 }

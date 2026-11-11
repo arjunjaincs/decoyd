@@ -75,7 +75,7 @@ func readComm(pid int32, procRoot string) string {
 // parseStat parses /proc/<pid>/stat to extract ppid and starttime (field 22).
 // It handles comm values containing spaces and parentheses by finding the LAST ')'.
 func parseStat(pid int32, procRoot string) (startTicks uint64, ppid int32, err error) {
-	data, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(int(pid)), "stat"))
+	data, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(int(pid)), "stat")) // #nosec G304 -- procRoot is an injectable test parameter (default: /proc); pid is from kernel event
 	if err != nil {
 		return 0, 0, err
 	}
@@ -124,7 +124,7 @@ func readExe(pid int32, procRoot string) (path string, deleted bool) {
 // readCmdline reads /proc/<pid>/cmdline, replaces NUL bytes with spaces,
 // caps to 4096 bytes, and sanitizes.
 func readCmdline(pid int32, procRoot string) string {
-	data, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(int(pid)), "cmdline"))
+	data, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(int(pid)), "cmdline")) // #nosec G304 -- procRoot is an injectable test parameter (default: /proc); pid is from kernel event
 	if err != nil {
 		return ""
 	}
@@ -147,7 +147,7 @@ func readCwd(pid int32, procRoot string) string {
 
 // readUID parses /proc/<pid>/status for the first "Uid:" line and returns the real UID.
 func readUID(pid int32, procRoot string) uint32 {
-	data, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(int(pid)), "status"))
+	data, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(int(pid)), "status")) // #nosec G304 -- procRoot is an injectable test parameter (default: /proc); pid is from kernel event
 	if err != nil {
 		return 0
 	}
@@ -172,7 +172,7 @@ func readUID(pid int32, procRoot string) uint32 {
 // values of npm_package_name, npm_package_version, and npm_lifecycle_event.
 // All values are sanitized to 512 bytes. No other environment variables are read.
 func ReadEnvFiltered(pid int32, procRoot string) (name, version, lifecycle string) {
-	data, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(int(pid)), "environ"))
+	data, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(int(pid)), "environ")) // #nosec G304 -- procRoot is an injectable test parameter (default: /proc); pid is from kernel event
 	if err != nil {
 		return "", "", ""
 	}
@@ -210,7 +210,7 @@ func exeSHA256(pid int32, exePath string, procRoot string) string {
 	if digest, ok := exeCacheLookup(k); ok {
 		return digest
 	}
-	f, err := os.Open(exeLink)
+	f, err := os.Open(exeLink) // #nosec G304 -- exeLink is read from readlink(/proc/<pid>/exe)
 	if err != nil {
 		return ""
 	}
