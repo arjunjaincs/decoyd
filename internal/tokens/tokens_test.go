@@ -318,8 +318,8 @@ func TestNoStaticIdentifiers(t *testing.T) {
 
 	// wordPatterns must NOT appear as whole words in structural text.
 	wordPatterns := []*regexp.Regexp{
-		regexp.MustCompile(`(?i)fake`),
-		regexp.MustCompile(`(?i)example`),
+		regexp.MustCompile(`(?i)\bfake\b`),
+		regexp.MustCompile(`(?i)\bexample\b`),
 	}
 
 	allTypes := []string{
