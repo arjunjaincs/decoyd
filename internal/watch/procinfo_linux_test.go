@@ -291,3 +291,118 @@ func TestBuildAttribution_NpmEnvCaptured(t *testing.T) {
 		t.Errorf("NpmLifecycleEvent = %q; want %q", a.NpmLifecycleEvent, "postinstall")
 	}
 }
+
+func setupFixtureProc(t *testing.T, root string, pid, ppid int, comm string, startTicks uint64) (binPath, workDir string) {
+	t.Helper()
+	binDir := t.TempDir()
+	binPath = filepath.Join(binDir, comm)
+	if err := os.WriteFile(binPath, []byte("#!/bin/sh\necho hi\n"), 0o755); err != nil {
+		t.Fatalf("write exe: %v", err)
+	}
+	workDir = filepath.Join(binDir, "work")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("mkdir work: %v", err)
+	}
+	dir := mkProcDir(t, root, pid)
+	writeFile(t, dir, "stat", makeStat(pid, comm, ppid, startTicks))
+	writeFile(t, dir, "comm", comm+"\n")
+	writeFile(t, dir, "cmdline", comm+"\x00steal.js\x00")
+	writeFile(t, dir, "status", fmt.Sprintf("Name:\t%s\nUid:\t1000\t1000\t1000\t1000\n", comm))
+	writeFile(t, dir, "environ", "HOME=/home/user\x00npm_package_name=stealer-pkg\x00npm_package_version=2.0.0\x00npm_lifecycle_event=postinstall\x00")
+	if err := os.Symlink(binPath, filepath.Join(dir, "exe")); err != nil {
+		t.Fatalf("symlink exe: %v", err)
+	}
+	if err := os.Symlink(workDir, filepath.Join(dir, "cwd")); err != nil {
+		t.Fatalf("symlink cwd: %v", err)
+	}
+	return binPath, workDir
+}
+
+func TestCollectProcess_VanishedBeforePostStatCheck(t *testing.T) {
+	root := t.TempDir()
+	binPath, workDir := setupFixtureProc(t, root, 9901, 42, "node", 98765)
+	setupFixtureProc(t, root, 42, 1, "npm", 12345)
+
+	origHook := beforePostStatHook
+	beforePostStatHook = func(pid int32, procRoot string) {
+		if pid == 9901 {
+			_ = os.Remove(filepath.Join(procRoot, "9901", "stat"))
+		}
+	}
+	t.Cleanup(func() { beforePostStatHook = origHook })
+
+	a := BuildAttribution(9901, root)
+	if a == nil {
+		t.Fatal("BuildAttribution returned nil")
+	}
+	if a.Confidence != 1 {
+		t.Errorf("Confidence = %d; want 1 (ConfidenceLow)", a.Confidence)
+	}
+	if a.Accessor.PPID != 42 {
+		t.Errorf("Accessor.PPID = %d; want 42", a.Accessor.PPID)
+	}
+	if a.Accessor.Comm != "node" {
+		t.Errorf("Accessor.Comm = %q; want %q", a.Accessor.Comm, "node")
+	}
+	if a.Accessor.Exe != binPath {
+		t.Errorf("Accessor.Exe = %q; want %q", a.Accessor.Exe, binPath)
+	}
+	if a.Accessor.ExeSHA256 == "" {
+		t.Errorf("Accessor.ExeSHA256 = empty; want non-empty hash read while alive")
+	}
+	if a.Accessor.Cmdline != "node steal.js" {
+		t.Errorf("Accessor.Cmdline = %q; want %q", a.Accessor.Cmdline, "node steal.js")
+	}
+	if a.Accessor.Cwd != workDir {
+		t.Errorf("Accessor.Cwd = %q; want %q", a.Accessor.Cwd, workDir)
+	}
+	if a.Accessor.UID != 1000 {
+		t.Errorf("Accessor.UID = %d; want 1000", a.Accessor.UID)
+	}
+	if a.Accessor.StartTicks != 98765 {
+		t.Errorf("Accessor.StartTicks = %d; want 98765", a.Accessor.StartTicks)
+	}
+	if a.NpmPackage != "stealer-pkg" || a.NpmVersion != "2.0.0" || a.NpmLifecycleEvent != "postinstall" {
+		t.Errorf("npm env = (%q, %q, %q); want (stealer-pkg, 2.0.0, postinstall)",
+			a.NpmPackage, a.NpmVersion, a.NpmLifecycleEvent)
+	}
+}
+
+func TestCollectProcess_StartTicksMismatch_DiscardsAllProcFields(t *testing.T) {
+	root := t.TempDir()
+	setupFixtureProc(t, root, 9902, 42, "node", 98765)
+	setupFixtureProc(t, root, 42, 1, "npm", 12345)
+
+	origHook := beforePostStatHook
+	beforePostStatHook = func(pid int32, procRoot string) {
+		if pid == 9902 {
+			statPath := filepath.Join(procRoot, "9902", "stat")
+			_ = os.Remove(statPath)
+			writeFile(t, filepath.Join(procRoot, "9902"), "stat", makeStat(9902, "innocent", 1, 999999))
+		}
+	}
+	t.Cleanup(func() { beforePostStatHook = origHook })
+
+	a := BuildAttribution(9902, root)
+	if a == nil {
+		t.Fatal("BuildAttribution returned nil")
+	}
+	if a.Confidence != 1 {
+		t.Errorf("Confidence = %d; want 1 (ConfidenceLow)", a.Confidence)
+	}
+	if a.Accessor.PID != 9902 {
+		t.Errorf("Accessor.PID = %d; want 9902", a.Accessor.PID)
+	}
+	if a.Accessor.PPID != 0 || a.Accessor.Comm != "" || a.Accessor.Exe != "" ||
+		a.Accessor.ExeDeleted || a.Accessor.ExeSHA256 != "" || a.Accessor.Cmdline != "" ||
+		a.Accessor.Cwd != "" || a.Accessor.UID != 0 || a.Accessor.StartTicks != 0 {
+		t.Errorf("expected all /proc-derived Accessor fields discarded on PID reuse, got %+v", a.Accessor)
+	}
+	if a.NpmPackage != "" || a.NpmVersion != "" || a.NpmLifecycleEvent != "" {
+		t.Errorf("expected npm env discarded on PID reuse, got (%q, %q, %q)",
+			a.NpmPackage, a.NpmVersion, a.NpmLifecycleEvent)
+	}
+	if len(a.Ancestors) != 0 {
+		t.Errorf("expected Ancestors empty on PID reuse, got %+v", a.Ancestors)
+	}
+}

@@ -234,10 +234,18 @@ type processSnapshot struct {
 	npmName      string
 	npmVersion   string
 	npmLifecycle string
+	vanished     bool
 	pidReused    bool
 }
 
+// beforePostStatHook is an optional test hook invoked in collectProcess immediately
+// before the post-read startTicks check.
+var beforePostStatHook func(pid int32, procRoot string)
+
 // collectProcess reads all /proc fields for pid and detects PID reuse.
+// When the process vanishes before the post-read startTicks check, fields read
+// while alive are kept and marked vanished (ConfidenceLow). When startTicks
+// mismatches (PID reused), all /proc-derived fields are discarded.
 func collectProcess(pid int32, procRoot string) processSnapshot {
 	startTicks0, ppid, err := parseStat(pid, procRoot)
 	if err != nil {
@@ -246,7 +254,7 @@ func collectProcess(pid int32, procRoot string) processSnapshot {
 				PID:  pid,
 				Comm: readComm(pid, procRoot),
 			},
-			pidReused: true,
+			vanished: true,
 		}
 	}
 
@@ -258,27 +266,38 @@ func collectProcess(pid int32, procRoot string) processSnapshot {
 	npmName, npmVersion, npmLifecycle := ReadEnvFiltered(pid, procRoot)
 	sha := exeSHA256(pid, exePath, procRoot)
 
-	// Re-read startTicks to detect PID reuse
-	startTicks1, _, err2 := parseStat(pid, procRoot)
-	pidReused := err2 != nil || startTicks0 != startTicks1
-
-	info := attribution.ProcessInfo{
-		PID:        pid,
-		PPID:       ppid,
-		Comm:       comm,
-		Exe:        exePath,
-		ExeDeleted: deleted,
-		Cmdline:    cmdline,
-		Cwd:        cwd,
-		UID:        uid,
-		StartTicks: startTicks0,
-		ExeSHA256:  sha,
+	if beforePostStatHook != nil {
+		beforePostStatHook(pid, procRoot)
 	}
+
+	// Re-read startTicks to detect PID reuse vs process exit.
+	startTicks1, _, err2 := parseStat(pid, procRoot)
+	vanished := err2 != nil
+	pidReused := err2 == nil && startTicks0 != startTicks1
+
+	var info attribution.ProcessInfo
 	if pidReused {
-		// Data is stale — clear sensitive fields
-		info.Exe = ""
-		info.ExeDeleted = false
-		info.ExeSHA256 = ""
+		// PID was reused by another process — discard all /proc-derived fields.
+		info = attribution.ProcessInfo{PID: pid}
+		ppid = 0
+		startTicks0 = 0
+		npmName = ""
+		npmVersion = ""
+		npmLifecycle = ""
+	} else {
+		// Still live, or vanished before post-read check: keep fields read while alive.
+		info = attribution.ProcessInfo{
+			PID:        pid,
+			PPID:       ppid,
+			Comm:       comm,
+			Exe:        exePath,
+			ExeDeleted: deleted,
+			Cmdline:    cmdline,
+			Cwd:        cwd,
+			UID:        uid,
+			StartTicks: startTicks0,
+			ExeSHA256:  sha,
+		}
 	}
 	return processSnapshot{
 		startTicks0:  startTicks0,
@@ -288,6 +307,7 @@ func collectProcess(pid int32, procRoot string) processSnapshot {
 		npmName:      npmName,
 		npmVersion:   npmVersion,
 		npmLifecycle: npmLifecycle,
+		vanished:     vanished,
 		pidReused:    pidReused,
 	}
 }
@@ -327,7 +347,13 @@ func AncestorChain(pid int32, maxDepth int, procRoot string) attribution.Ancesto
 		}
 		seen[ppid] = true
 		snap := collectProcess(ppid, procRoot)
+		if snap.pidReused {
+			break
+		}
 		chain = append(chain, snap.info)
+		if snap.vanished {
+			break
+		}
 		current = ppid
 	}
 	return chain
@@ -335,16 +361,19 @@ func AncestorChain(pid int32, maxDepth int, procRoot string) attribution.Ancesto
 
 // BuildAttribution builds a full Attribution record for a process event.
 // Called from the fanotify dispatch worker (not the event loop, to avoid blocking).
-// Confidence is High if exe+SHA are present and PID not reused; Medium if exe only; Low otherwise.
+// Confidence is High if exe+SHA are present and PID is verified live; Medium if exe SHA is missing; Low if vanished or reused.
 func BuildAttribution(pid int32, procRoot string) *attribution.Attribution {
 	if procRoot == "" {
 		procRoot = DefaultProcRoot
 	}
 	snap := collectProcess(pid, procRoot)
-	ancestors := AncestorChain(pid, 8, procRoot)
+	var ancestors attribution.AncestorChain
+	if !snap.pidReused && !snap.vanished {
+		ancestors = AncestorChain(pid, 8, procRoot)
+	}
 
 	confidence := attribution.ConfidenceHigh
-	if snap.pidReused {
+	if snap.pidReused || snap.vanished {
 		confidence = attribution.ConfidenceLow
 	} else if snap.info.ExeSHA256 == "" {
 		confidence = attribution.ConfidenceMedium

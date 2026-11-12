@@ -68,7 +68,7 @@ ADR 0001 is ACCEPTED. Tier 1 is **implemented** on `batch/tier1-v1`.
 
 ### T10 — PID reuse in process attribution
 **Threat**: A short-lived process touches the decoy; by the time Decoyd reads `/proc/<pid>/`, the PID has been reused by an innocent process.
-**Mitigation**: `internal/watch/procinfo_linux.go` re-reads `/proc/<pid>/stat` starttime (`startTicks1`) after collecting `/proc` fields; if ticks changed or vanished, sensitive fields (`Exe`, `ExeDeleted`, `ExeSHA256`) are cleared and `Confidence` drops to `ConfidenceLow` (`1`).
+**Mitigation**: `internal/watch/procinfo_linux.go` re-reads `/proc/<pid>/stat` starttime (`startTicks1`) after collecting `/proc` fields: if `startTicks` mismatches (PID reused), all `/proc`-derived fields (`PPID`, `Comm`, `Exe`, `ExeDeleted`, `ExeSHA256`, `Cmdline`, `Cwd`, `UID`, `StartTicks`, `NpmPackage`, `NpmVersion`, `NpmLifecycleEvent`) are discarded and `Confidence` drops to `ConfidenceLow` (`1`); if the process vanished before the post-read check (`err != nil`), fields read while alive are retained and `Confidence` drops to `ConfidenceLow` (`1`).
 
 ### T11 — Token value leakage in attribution (O7, O8)
 **Threat**: Attribution fields (`cmdline`, `environ`) or logs leak the deployed token value.
