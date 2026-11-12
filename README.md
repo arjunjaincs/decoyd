@@ -55,8 +55,8 @@ decoyd events --fail-if-any   # exit 3 if anything was caught (use in CI)
 | `config` | `kubeconfig` | Kubeconfig YAML with random cluster/user + bearer token |
 | `backup.sql` | `db_dump` | SQL dump header, schema, fake rows |
 | `token.txt` | `dns_canary` | Unique subdomain label |
-| `.npmrc` | `npmrc` | npm access token (`npm_...`) |
-| `.pypirc` | `pypirc` | PyPI API token (`pypi-...`) |
+| `.npmrc` | `npmrc` | npm access token (`npm_...`; plausible, not verified against official specs) |
+| `.pypirc` | `pypirc` | PyPI API token (`pypi-...`; plausible, not verified against official specs) |
 | `config.json` | `docker_config` | Docker registry base64 auth JSON |
 | `.git-credentials` | `git_credentials` | Git credential store URL with `ghp_...` PAT |
 | `.netrc` | `netrc` | `.netrc` host/login/password |
@@ -116,8 +116,20 @@ internal/tokens/      Token generators (18 types, no static identifiers)
 internal/alert/       Alerters (Discord, Slack, Telegram, Teams, ntfy, webhook)
 internal/triglog/     triggers.jsonl (schema v1)
 detection/            Wazuh + Sigma detection content (syntax-checked, untested)
-docs/                 ADR, EVENT-SCHEMA, ATTACK-MAPPING, BENCHMARKS, THREAT-MODEL, blog draft
+docs/                 ADR, EVENT-SCHEMA, ATTACK-MAPPING, BENCHMARKS, THREAT-MODEL, blog
 ```
+
+---
+
+## Development notes
+
+Decoyd was built with AI coding agents under human review. The verifiable evidence for
+build, security scanning, cross-platform tests, `systemd` lifecycle behavior, npm Tier 1
+attribution, and benchmarks is the automated GitHub Actions CI history:
+
+- [`CI` (Linux & Windows matrix, govulncheck, gosec, staticcheck, vet)](https://github.com/arjunjaincs/decoyd/actions/workflows/ci.yml) — run [`43162675839`](https://github.com/arjunjaincs/decoyd/actions/runs/43162675839)
+- [`CI — Privileged and Windows` (`fanotify`, `npm-e2e`, `system-lifecycle`, `benchmarks`)](https://github.com/arjunjaincs/decoyd/actions/workflows/ci-privileged.yml) — runs [`43161750870`](https://github.com/arjunjaincs/decoyd/actions/runs/43161750870), [`43162675883`](https://github.com/arjunjaincs/decoyd/actions/runs/43162675883)
+- [`Decoyd Demo (Tier 1 npm Credential Access)`](https://github.com/arjunjaincs/decoyd/actions/workflows/demo.yml) — run [`43162675881`](https://github.com/arjunjaincs/decoyd/actions/runs/43162675881)
 
 ---
 
