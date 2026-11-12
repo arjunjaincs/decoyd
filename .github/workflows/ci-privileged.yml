@@ -260,3 +260,142 @@ jobs:
 
       - name: vet
         run: go vet ./...
+
+  npm-e2e:
+    name: Real npm end-to-end (Tier 1 fanotify)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: "stable"
+          cache: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "20"
+
+      - name: Build decoyd
+        run: go build -o /tmp/decoyd ./cmd/decoyd
+
+      - name: Seed decoys and start Tier 1 watcher
+        run: |
+          DATA_DIR="$RUNNER_TEMP/decoyd-npm-e2e"
+          mkdir -p "$DATA_DIR"
+          echo "DATA_DIR=$DATA_DIR" >> "$GITHUB_ENV"
+
+          # Do not seed $HOME/.npmrc here because npm itself reads ~/.npmrc even
+          # under --ignore-scripts; seed credential decoys scanned only by postinstall.
+          SECRET_PYPI="$(openssl rand -hex 20)"
+          printf '[distutils]\nindex-servers = pypi\n[pypi]\nusername = __token__\npassword = pypi-%s\n' "$SECRET_PYPI" > "$HOME/.pypirc"
+          chmod 0600 "$HOME/.pypirc"
+
+          SECRET_VAULT="$(openssl rand -hex 20)"
+          printf 'hvs.%s\n' "$SECRET_VAULT" > "$HOME/.vault-token"
+          chmod 0600 "$HOME/.vault-token"
+
+          OWNER_UID="$(id -u)"
+          cat <<EOF > "$DATA_DIR/deployed_tokens.json"
+          [
+            {
+              "id": "npm-e2e-pypirc",
+              "type": "pypirc",
+              "deployed_path": "$HOME/.pypirc",
+              "owner_uid": $OWNER_UID
+            },
+            {
+              "id": "npm-e2e-vault",
+              "type": "vault_token",
+              "deployed_path": "$HOME/.vault-token",
+              "owner_uid": $OWNER_UID
+            }
+          ]
+          EOF
+          chmod 0600 "$DATA_DIR/deployed_tokens.json"
+
+          sudo sh -c 'exec /tmp/decoyd watch --tier1 --data-dir "$1" > /tmp/decoyd-npm-watch.log 2>&1' _ "$DATA_DIR" &
+          echo "DECOYD_SUDO_PID=$!" >> "$GITHUB_ENV"
+          ready=0
+          for i in $(seq 1 30); do
+            if grep -q "decoyd watch started" /tmp/decoyd-npm-watch.log 2>/dev/null; then
+              ready=1
+              break
+            fi
+            sleep 0.5
+          done
+          cat /tmp/decoyd-npm-watch.log || true
+          test "$ready" -eq 1
+          grep -q "monitoring 2 tokens" /tmp/decoyd-npm-watch.log
+
+      - name: Negative test (npm install --ignore-scripts produces 0 events)
+        run: |
+          mkdir -p "$RUNNER_TEMP/npm-neg"
+          cd "$RUNNER_TEMP/npm-neg"
+          npm install --no-save --ignore-scripts "$GITHUB_WORKSPACE/examples/demo-evil-pkg"
+          sleep 2.6
+          if [ -f "$DATA_DIR/triggers.jsonl" ] && [ -s "$DATA_DIR/triggers.jsonl" ]; then
+            echo "ERROR: expected no events under --ignore-scripts, got:"
+            cat "$DATA_DIR/triggers.jsonl"
+            exit 1
+          fi
+          echo "Negative test passed: 0 events under npm install --ignore-scripts."
+
+      - name: Positive test (npm install runs postinstall and records attribution)
+        run: |
+          mkdir -p "$RUNNER_TEMP/npm-pos"
+          cd "$RUNNER_TEMP/npm-pos"
+          npm install --no-save "$GITHUB_WORKSPACE/examples/demo-evil-pkg"
+
+          found=0
+          for i in $(seq 1 20); do
+            if [ -f "$DATA_DIR/triggers.jsonl" ] && grep -q "demo-evil-pkg" "$DATA_DIR/triggers.jsonl"; then
+              found=1
+              break
+            fi
+            sleep 0.5
+          done
+          echo "=== triggers.jsonl ==="
+          sudo cat "$DATA_DIR/triggers.jsonl" || true
+          test "$found" -eq 1
+
+          sudo cp "$DATA_DIR/triggers.jsonl" "$RUNNER_TEMP/npm-e2e-triggers.jsonl"
+          sudo chmod 0644 "$RUNNER_TEMP/npm-e2e-triggers.jsonl"
+          python3 - "$RUNNER_TEMP/npm-e2e-triggers.jsonl" <<'PY'
+          import json, sys
+          events = []
+          with open(sys.argv[1], "r", encoding="utf-8") as f:
+              for line in f:
+                  line = line.strip()
+                  if line:
+                      events.append(json.loads(line))
+          matches = [
+              e for e in events
+              if e.get("watcher_tier") == "tier1"
+              and isinstance(e.get("attribution"), dict)
+              and e["attribution"].get("npm_package") == "demo-evil-pkg"
+              and e["attribution"].get("npm_lifecycle_event") == "postinstall"
+          ]
+          assert matches, f"No matching postinstall event in {events}"
+          print("Verified npm-e2e event:", json.dumps(matches[-1], indent=2))
+          PY
+
+      - name: Upload npm-e2e events artifact
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: npm-e2e-events
+          path: |
+            ${{ runner.temp }}/npm-e2e-triggers.jsonl
+            /tmp/decoyd-npm-watch.log
+          if-no-files-found: ignore
+
+      - name: Stop watcher
+        if: always()
+        run: |
+          sudo pkill -TERM -f '/tmp/decoyd watch --tier1' || true
+          cat /tmp/decoyd-npm-watch.log || true

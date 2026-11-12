@@ -39,6 +39,8 @@ decoyd events --fail-if-any   # exit 3 if anything was caught (use in CI)
 | Root required | Yes | No |
 | Windows read-only open detection | N/A | ❌ (write/rename/delete only on Windows) |
 
+> **Package-manager attribution scope:** Tier 1 package attribution reads only npm lifecycle environment variables (`npm_package_name`, `npm_package_version`, `npm_lifecycle_event`) from `/proc/<pid>/environ`. `pnpm` and `yarn` are untested, and `pip` is not supported.
+
 ---
 
 ## Token Types (18)
