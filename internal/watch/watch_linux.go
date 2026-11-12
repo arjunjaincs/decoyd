@@ -816,6 +816,78 @@ func (w *linuxWatcher) dispatchFanotifyEvent(tok DeployedToken, pid int32, attr 
 	appendTriglogForWatcher(w.dataDir, ev)
 }
 
+const fanotifyOverflowRateKey = "__fanotify_overflow__"
+
+// safeDispatchFanotifyOverflow wraps dispatchFanotifyOverflow with panic
+// recovery so an alert sink failure cannot terminate the fanotify loop.
+func (w *linuxWatcher) safeDispatchFanotifyOverflow() {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(os.Stderr, "decoyd watch: panic dispatching overflow alert: %v\n", r)
+		}
+	}()
+	w.dispatchFanotifyOverflow(time.Now())
+}
+
+// dispatchFanotifyOverflow sends at most one sanitized "events lost" alert
+// per hour window when the kernel reports FAN_Q_OVERFLOW, logs the outcome,
+// and lets the watcher continue running.
+func (w *linuxWatcher) dispatchFanotifyOverflow(now time.Time) {
+	if w.cfg.inQuietHours(now) {
+		return
+	}
+
+	w.fanRateMu.Lock()
+	if w.fanRateMap == nil {
+		w.fanRateMap = make(map[string]*rateEntry)
+	}
+	re := w.fanRateMap[fanotifyOverflowRateKey]
+	rateLimited := false
+	if re == nil || now.After(re.windowEnd) {
+		w.fanRateMap[fanotifyOverflowRateKey] = &rateEntry{count: 1, windowEnd: now.Add(time.Hour)}
+	} else {
+		re.count++
+		rateLimited = true
+	}
+	w.fanRateMu.Unlock()
+	if rateLimited {
+		log.Printf("decoyd fanotify: overflow alert suppressed by rate limit")
+		return
+	}
+
+	alertCfg, err := loadAlertConfigForWatcher(w.dataDir)
+	if err != nil {
+		log.Printf("decoyd fanotify: overflow alert load config failed: %v", err)
+		return
+	}
+	ch, ok := alertCfg.DefaultChannel()
+	if !ok {
+		log.Printf("decoyd fanotify: overflow alert skipped (no alert channel configured)")
+		return
+	}
+	a, err := alert.NewAlerter(ch)
+	if err != nil {
+		log.Printf("decoyd fanotify: overflow alert init failed: %s", alert.SanitizeErrString(err))
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+
+	payload := alert.AlertPayload{
+		TokenID:     sanitize.Sanitize("fanotify-overflow", 64),
+		TokenType:   sanitize.Sanitize("system", 64),
+		Path:        sanitize.Sanitize(w.dataDir, 512),
+		TriggeredAt: now.UTC(),
+		Detail:      sanitize.Sanitize("fanotify event queue overflow (FAN_Q_OVERFLOW): events lost", 128),
+	}
+	if sendErr := a.Send(ctx, payload); sendErr != nil {
+		log.Printf("decoyd fanotify: overflow alert delivery failed: %s", alert.SanitizeErrString(sendErr))
+		return
+	}
+	log.Printf("decoyd fanotify: sent FAN_Q_OVERFLOW events-lost alert")
+}
+
 // ----------------------------------------------------------------------------
 // loadTokens — bbolt or snapshot file depending on mode
 // ----------------------------------------------------------------------------

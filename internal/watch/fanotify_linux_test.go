@@ -7,16 +7,23 @@ package watch
 import (
 	"bufio"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"go/scanner"
 	"go/token"
+	"io"
 	"math"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/arjunjaincs/decoyd/internal/alert"
 	"golang.org/x/sys/unix"
 )
 
@@ -374,5 +381,125 @@ func TestParseFanotifyEventsWithCloser_ClosesOrphanFDs(t *testing.T) {
 	}
 	if len(closed) != 2 || closed[0] != 42 || closed[1] != 77 {
 		t.Fatalf("closed fds = %v; want [42 77]", closed)
+	}
+}
+
+func TestFanotifyWatcher_Overflow_SendsSanitizedRateLimitedAlert(t *testing.T) {
+	var hits atomic.Int32
+	payloadCh := make(chan alert.AlertPayload, 4)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var p alert.AlertPayload
+		if err := json.Unmarshal(body, &p); err == nil {
+			payloadCh <- p
+		}
+		hits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	// Create a dataDir containing ANSI/bidi sequences to verify sanitization
+	// happens before building AlertPayload as well as at the webhook sink.
+	baseDir := t.TempDir()
+	dataDir := filepath.Join(baseDir, "dir\x1b[31m\u202etest")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatalf("mkdir dataDir: %v", err)
+	}
+	if err := alert.Save(dataDir, alert.AlertConfig{
+		Channels: []alert.ChannelConfig{
+			{ID: "wh1", Type: alert.ChannelWebhook, WebhookURL: ts.URL},
+		},
+		DefaultID: "wh1",
+	}); err != nil {
+		t.Fatalf("alert.Save: %v", err)
+	}
+
+	lw := &linuxWatcher{
+		dataDir: dataDir,
+		cfg:     DefaultWatcherConfig(),
+		inoFD:   -1,
+		stopR:   -1,
+		stopW:   -1,
+	}
+
+	var fanPipe [2]int
+	if err := unix.Pipe2(fanPipe[:], unix.O_CLOEXEC|unix.O_NONBLOCK); err != nil {
+		t.Fatalf("pipe2 fan: %v", err)
+	}
+	defer unix.Close(fanPipe[0])
+	defer unix.Close(fanPipe[1])
+
+	var stopPipe [2]int
+	if err := unix.Pipe2(stopPipe[:], unix.O_CLOEXEC|unix.O_NONBLOCK); err != nil {
+		t.Fatalf("pipe2 stop: %v", err)
+	}
+	defer unix.Close(stopPipe[0])
+	defer unix.Close(stopPipe[1])
+
+	ownPID, _ := safeIntToInt32(os.Getpid())
+	fw := &fanotifyWatcher{
+		fanFD:  fanPipe[0],
+		stopR:  stopPipe[0],
+		stopW:  stopPipe[1],
+		done:   make(chan struct{}),
+		ownPID: ownPID,
+	}
+
+	var dispatched atomic.Int32
+	loopErr := make(chan struct{})
+	go func() {
+		fw.runFanotifyLoopWithOverflow(func(_ DeployedToken, _ int32) {
+			dispatched.Add(1)
+		}, lw.safeDispatchFanotifyOverflow)
+		close(loopErr)
+	}()
+
+	overflowBuf := makeFanotifyEvent(fanotifyMetadataSize, fanotifyMetadataVersion, unix.FAN_Q_OVERFLOW, -1, 0)
+	// Write two separate overflow buffers — alert rate-limiting must coalesce to 1 alert.
+	if _, err := unix.Write(fanPipe[1], overflowBuf); err != nil {
+		t.Fatalf("write overflow #1: %v", err)
+	}
+	select {
+	case p := <-payloadCh:
+		if !strings.Contains(p.Detail, "events lost") {
+			t.Errorf("overflow alert detail = %q; want substring %q", p.Detail, "events lost")
+		}
+		if strings.Contains(p.Path, "\x1b") || strings.ContainsRune(p.Path, '\u202e') {
+			t.Errorf("overflow alert path leaked unsanitized chars: %q", p.Path)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for first FAN_Q_OVERFLOW alert")
+	}
+
+	if _, err := unix.Write(fanPipe[1], overflowBuf); err != nil {
+		t.Fatalf("write overflow #2: %v", err)
+	}
+
+	// Verify loop kept running after overflows by sending a self-PID event,
+	// then waiting briefly before cleanly signalling stop.
+	selfBuf := makeFanotifyEvent(fanotifyMetadataSize, fanotifyMetadataVersion, unix.FAN_OPEN, -1, fw.ownPID)
+	if _, err := unix.Write(fanPipe[1], selfBuf); err != nil {
+		t.Fatalf("write self follow-up: %v", err)
+	}
+	time.Sleep(150 * time.Millisecond)
+
+	select {
+	case <-loopErr:
+		t.Fatal("runFanotifyLoopWithOverflow exited early on overflow; must keep running")
+	default:
+	}
+
+	fw.signalStop()
+	select {
+	case <-loopErr:
+	case <-time.After(3 * time.Second):
+		t.Fatal("runFanotifyLoopWithOverflow did not exit on signalStop")
+	}
+
+	if got := hits.Load(); got != 1 {
+		t.Errorf("received %d overflow alerts; want exactly 1 (rate-limited)", got)
+	}
+	if dispatched.Load() != 0 {
+		t.Errorf("token dispatch called %d times on overflow; want 0", dispatched.Load())
 	}
 }

@@ -462,7 +462,7 @@ func (fw *fanotifyWatcher) markDone() {
 	})
 }
 
-func (fw *fanotifyWatcher) runFanotifyLoop(dispatch func(tok DeployedToken, pid int32)) {
+func (fw *fanotifyWatcher) runFanotifyLoopWithOverflow(dispatch func(tok DeployedToken, pid int32), onOverflow func()) {
 	defer fw.markDone()
 	const bufSize = fanotifyMetadataSize * 256
 	buf := make([]byte, bufSize)
@@ -532,7 +532,10 @@ func (fw *fanotifyWatcher) runFanotifyLoop(dispatch func(tok DeployedToken, pid 
 		events, overflow := parseFanotifyEventsWithCloser(buf[:nr], func(fd int) { _ = unix.Close(fd) })
 		if overflow {
 			log.Printf("decoyd fanotify: event queue overflow (FAN_Q_OVERFLOW) — some open/access events lost")
-			// Do NOT fire all tokens. Per O1: log and continue.
+			// Send one sanitized, rate-limited alert and keep running (G4).
+			if onOverflow != nil {
+				onOverflow()
+			}
 		}
 
 		for _, ev := range events {

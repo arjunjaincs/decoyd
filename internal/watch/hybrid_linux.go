@@ -98,13 +98,13 @@ func (h *hybridLinuxWatcher) start() error {
 }
 
 func (h *hybridLinuxWatcher) runFanotifyDispatch() {
-	h.fanWatcher.runFanotifyLoop(func(tok DeployedToken, pid int32) {
+	h.fanWatcher.runFanotifyLoopWithOverflow(func(tok DeployedToken, pid int32) {
 		var attr *attribution.Attribution
 		if pid > 0 {
 			attr = BuildAttribution(pid, DefaultProcRoot)
 		}
 		h.inoWatcher.dispatchFanotifyEvent(tok, pid, attr)
-	})
+	}, h.inoWatcher.safeDispatchFanotifyOverflow)
 }
 
 func (h *hybridLinuxWatcher) stop() {
