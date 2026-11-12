@@ -135,6 +135,32 @@ attribution, and benchmarks is the automated GitHub Actions CI history:
 
 ---
 
+## Verify releases
+
+Every tagged release published by [`.github/workflows/release.yml`](.github/workflows/release.yml) includes GoReleaser archives, SPDX-2.3 SBOMs (`*.sbom.json`), `checksums.txt`, and a keyless Sigstore `cosign` signature + certificate (`checksums.txt.sig`, `checksums.txt.pem`).
+
+```bash
+# Download the release archives, SBOMs, checksums, and signature (example: v1.0.0-rc.1)
+gh release download v1.0.0-rc.1 --repo arjunjaincs/decoyd
+
+# 1. Verify archive and SBOM SHA-256 digests
+sha256sum -c checksums.txt
+
+# 2. Verify the keyless Sigstore cosign signature on checksums.txt
+# Replace <tag> (e.g., v1.0.0-rc.1) with the release tag you downloaded
+cosign verify-blob \
+  --certificate checksums.txt.pem \
+  --signature checksums.txt.sig \
+  --certificate-identity "https://github.com/arjunjaincs/decoyd/.github/workflows/release.yml@refs/tags/v1.0.0-rc.1" \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+  checksums.txt
+
+# 3. Inspect the attached SPDX-2.3 SBOM for your archive
+ls -1 *.sbom.json
+```
+
+---
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
