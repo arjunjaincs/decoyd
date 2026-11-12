@@ -338,9 +338,9 @@ jobs:
           cd "$RUNNER_TEMP/npm-neg"
           npm install --no-save --ignore-scripts "$GITHUB_WORKSPACE/examples/demo-evil-pkg"
           sleep 2.6
-          if [ -f "$DATA_DIR/triggers.jsonl" ] && [ -s "$DATA_DIR/triggers.jsonl" ]; then
+          if sudo test -s "$DATA_DIR/triggers.jsonl"; then
             echo "ERROR: expected no events under --ignore-scripts, got:"
-            cat "$DATA_DIR/triggers.jsonl"
+            sudo cat "$DATA_DIR/triggers.jsonl"
             exit 1
           fi
           echo "Negative test passed: 0 events under npm install --ignore-scripts."
@@ -353,7 +353,7 @@ jobs:
 
           found=0
           for i in $(seq 1 20); do
-            if [ -f "$DATA_DIR/triggers.jsonl" ] && grep -q "demo-evil-pkg" "$DATA_DIR/triggers.jsonl"; then
+            if sudo test -f "$DATA_DIR/triggers.jsonl" && sudo grep -q "demo-evil-pkg" "$DATA_DIR/triggers.jsonl"; then
               found=1
               break
             fi
@@ -361,10 +361,12 @@ jobs:
           done
           echo "=== triggers.jsonl ==="
           sudo cat "$DATA_DIR/triggers.jsonl" || true
+          if sudo test -f "$DATA_DIR/triggers.jsonl"; then
+            sudo cp "$DATA_DIR/triggers.jsonl" "$RUNNER_TEMP/npm-e2e-triggers.jsonl"
+            sudo chmod 0644 "$RUNNER_TEMP/npm-e2e-triggers.jsonl"
+          fi
           test "$found" -eq 1
 
-          sudo cp "$DATA_DIR/triggers.jsonl" "$RUNNER_TEMP/npm-e2e-triggers.jsonl"
-          sudo chmod 0644 "$RUNNER_TEMP/npm-e2e-triggers.jsonl"
           python3 - "$RUNNER_TEMP/npm-e2e-triggers.jsonl" <<'PY'
           import json, sys
           events = []
