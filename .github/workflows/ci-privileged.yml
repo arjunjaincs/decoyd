@@ -419,6 +419,11 @@ jobs:
           go-version: "stable"
           cache: false
 
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "20"
+
       - name: Build decoyd
         run: go build -o /tmp/decoyd ./cmd/decoyd
 
@@ -562,9 +567,36 @@ jobs:
                   proc, logf, startup = start_watcher(data_dir, tier1, log_path)
                   trig_path = os.path.join(data_dir, "triggers.jsonl")
                   pos = 0
+                  byte_buf = b""
+                  seen_tokens = {}
                   latencies = []
                   tiers_seen = set()
                   poll_interval = 0.0002 if tier1 else 0.0005
+
+                  def drain_complete_lines(now_ns):
+                      nonlocal pos, byte_buf
+                      if not os.path.exists(trig_path):
+                          return
+                      with open(trig_path, "rb") as tf:
+                          tf.seek(pos)
+                          chunk = tf.read()
+                      if not chunk:
+                          return
+                      pos += len(chunk)
+                      byte_buf += chunk
+                      while b"\n" in byte_buf:
+                          raw_line, byte_buf = byte_buf.split(b"\n", 1)
+                          text = raw_line.decode("utf-8", errors="replace").strip()
+                          if not text:
+                              continue
+                          try:
+                              ev = json.loads(text)
+                          except json.JSONDecodeError:
+                              continue
+                          tid = ev.get("token_id")
+                          if tid and tid not in seen_tokens:
+                              seen_tokens[tid] = (now_ns, ev.get("watcher_tier", ""))
+
                   for tok in tokens:
                       rfd, wfd = os.pipe()
                       pid = os.fork()
@@ -584,28 +616,13 @@ jobs:
 
                       deadline = time.monotonic() + 10.0
                       found_ns = None
-                      buf = ""
-                      while time.monotonic() < deadline and found_ns is None:
-                          if os.path.exists(trig_path):
-                              with open(trig_path, "r", encoding="utf-8") as tf:
-                                  tf.seek(pos)
-                                  chunk = tf.read()
-                                  if chunk:
-                                      now_ns = time.monotonic_ns()
-                                      buf += chunk
-                                      pos += len(chunk.encode("utf-8"))
-                                      for line in buf.splitlines():
-                                          if not line.strip():
-                                              continue
-                                          ev = json.loads(line)
-                                          if ev.get("token_id") == tok["id"]:
-                                              found_ns = now_ns
-                                              tiers_seen.add(ev.get("watcher_tier", ""))
-                                              break
-                                      if "\n" in buf:
-                                          buf = "" if buf.endswith("\n") else buf.rsplit("\n", 1)[-1]
-                          if found_ns is None:
-                              time.sleep(poll_interval)
+                      while time.monotonic() < deadline:
+                          drain_complete_lines(time.monotonic_ns())
+                          if tok["id"] in seen_tokens:
+                              found_ns, tier = seen_tokens[tok["id"]]
+                              tiers_seen.add(tier)
+                              break
+                          time.sleep(poll_interval)
                       os.waitpid(pid, 0)
                       if found_ns is None:
                           raise RuntimeError(f"timeout waiting for {tok['id']} in triggers.jsonl")
@@ -675,21 +692,35 @@ jobs:
               finally:
                   shutil.rmtree(base, ignore_errors=True)
 
-          def count_events(trig_path):
+          def read_events(trig_path):
               if not os.path.exists(trig_path):
-                  return 0
-              with open(trig_path, "r", encoding="utf-8") as f:
-                  return sum(1 for line in f if line.strip())
+                  return []
+              with open(trig_path, "rb") as f:
+                  data = f.read()
+              events = []
+              for raw in data.split(b"\n")[:-1]:
+                  s = raw.decode("utf-8", errors="replace").strip()
+                  if not s:
+                      continue
+                  try:
+                      events.append(json.loads(s))
+                  except json.JSONDecodeError:
+                      continue
+              return events
 
           def measure_false_positives_tier1(hook_url):
               base = tempfile.mkdtemp(prefix="decoyd-fp-")
               try:
                   repo = os.path.join(base, "repo")
                   sib = os.path.join(base, "sibling")
+                  fake_home = os.path.join(base, "home")
+                  npm_proj = os.path.join(base, "npm-proj")
                   data_dir = os.path.join(base, "data")
                   log_path = os.path.join(base, "watch.log")
                   os.makedirs(os.path.join(repo, "src"), exist_ok=True)
                   os.makedirs(os.path.join(repo, ".aws"), exist_ok=True)
+                  os.makedirs(os.path.join(fake_home, ".docker"), exist_ok=True)
+                  os.makedirs(npm_proj, exist_ok=True)
                   os.makedirs(sib, exist_ok=True)
                   os.makedirs(data_dir, exist_ok=True)
 
@@ -697,6 +728,10 @@ jobs:
                       f.write("console.log('ok');\n")
                   with open(os.path.join(sib, "notes.txt"), "w", encoding="utf-8") as f:
                       f.write("API_TOKEN=non_decoy_sample\n")
+                  with open(os.path.join(npm_proj, "package.json"), "w", encoding="utf-8") as f:
+                      json.dump({"name": "fp-check", "version": "1.0.0"}, f)
+                  with open(os.path.join(fake_home, ".gitconfig"), "w", encoding="utf-8") as f:
+                      f.write("[credential]\n\thelper = store\n")
 
                   subprocess.run(["git", "-C", repo, "init", "-q"], check=True)
                   subprocess.run(["git", "-C", repo, "config", "user.email", "ci@example.com"], check=True)
@@ -705,15 +740,20 @@ jobs:
                   subprocess.run(["git", "-C", repo, "commit", "-q", "-m", "init"], check=True)
 
                   decoys = [
-                      ("fp-npmrc", "npmrc", os.path.join(repo, ".npmrc")),
-                      ("fp-env", "env_secrets", os.path.join(repo, ".env")),
-                      ("fp-aws", "aws_credentials", os.path.join(repo, ".aws", "credentials")),
+                      ("fp-npmrc", "npmrc", os.path.join(repo, ".npmrc"), "SECRET_VALUE=dummy\n"),
+                      ("fp-env", "env_secrets", os.path.join(repo, ".env"), "SECRET_VALUE=dummy\n"),
+                      ("fp-aws", "aws_credentials", os.path.join(repo, ".aws", "credentials"), "SECRET_VALUE=dummy\n"),
+                      ("j5-home-npmrc", "npmrc", os.path.join(fake_home, ".npmrc"), "//registry.npmjs.org/:_authToken=npm_dummyfp0000\n"),
+                      ("j5-home-pypirc", "pypirc", os.path.join(fake_home, ".pypirc"), "[distutils]\nindex-servers = pypi\n[pypi]\nusername = __token__\npassword = pypi-dummyfp\n"),
+                      ("j5-home-docker", "docker_config", os.path.join(fake_home, ".docker", "config.json"), "{\"auths\":{\"https://index.docker.io/v1/\":{\"auth\":\"ZHVtbXk6ZHVtbXk=\"}}}\n"),
+                      ("j5-home-gitcred", "git_credentials", os.path.join(fake_home, ".git-credentials"), "https://dummy:tok@github.com\n"),
+                      ("j5-home-netrc", "netrc", os.path.join(fake_home, ".netrc"), "machine pypi.org login __token__ password dummyfp\n"),
                   ]
                   uid = os.getuid()
                   snap_items = []
-                  for tid, ttype, dpath in decoys:
+                  for tid, ttype, dpath, body in decoys:
                       with open(dpath, "w", encoding="utf-8") as f:
-                          f.write("SECRET_VALUE=dummy\n")
+                          f.write(body)
                       os.chmod(dpath, 0o600)
                       snap_items.append({"id": tid, "type": ttype, "deployed_path": dpath, "owner_uid": uid})
                   with open(os.path.join(data_dir, "deployed_tokens.json"), "w", encoding="utf-8") as f:
@@ -723,12 +763,26 @@ jobs:
                   proc, logf, _ = start_watcher(data_dir, True, log_path)
                   trig_path = os.path.join(data_dir, "triggers.jsonl")
 
-                  def run_op(name, fn):
-                      before = count_events(trig_path)
-                      fn()
-                      time.sleep(2.6)
-                      after = count_events(trig_path)
-                      return {"operation": name, "events_delta": after - before}
+                  def run_op(name, fn, poll_positive=False):
+                      before = read_events(trig_path)
+                      ret = fn()
+                      rc = getattr(ret, "returncode", 0)
+                      if poll_positive:
+                          deadline = time.monotonic() + 10.0
+                          while time.monotonic() < deadline:
+                              if len(read_events(trig_path)) > len(before):
+                                  break
+                              time.sleep(0.05)
+                      else:
+                          time.sleep(2.6)
+                      after = read_events(trig_path)
+                      delta_evs = after[len(before):]
+                      return {
+                          "operation": name,
+                          "rc": rc,
+                          "events_delta": len(delta_evs),
+                          "triggered_tokens": sorted({e.get("token_id", "") for e in delta_evs}),
+                      }
 
                   def editor_stat_loop():
                       for p in [os.path.join(repo, ".npmrc"), os.path.join(repo, ".env")]:
@@ -737,20 +791,41 @@ jobs:
                               os.stat(p)
                               time.sleep(0.01)
 
-                  results = [
+                  non_config_results = [
                       run_op("ls -la <tree>", lambda: subprocess.run(["ls", "-la", repo], check=True, stdout=subprocess.DEVNULL)),
                       run_op("stat <decoy> (.npmrc, .env)", lambda: subprocess.run(["stat", os.path.join(repo, ".npmrc"), os.path.join(repo, ".env")], check=True, stdout=subprocess.DEVNULL)),
                       run_op("find <tree> -maxdepth 3", lambda: subprocess.run(["find", repo, "-maxdepth", "3"], check=True, stdout=subprocess.DEVNULL)),
                       run_op("git status (in repo with decoys)", lambda: subprocess.run(["git", "-C", repo, "status"], check=True, stdout=subprocess.DEVNULL)),
                       run_op("grep -rn API_TOKEN <sibling-dir>", lambda: subprocess.run(["grep", "-rn", "API_TOKEN", sib], check=True, stdout=subprocess.DEVNULL)),
                       run_op("editor-style lstat/stat loop (50x, 10ms)", editor_stat_loop),
-                      run_op("positive control: cat <decoy>", lambda: subprocess.run(["cat", os.path.join(repo, ".env")], check=True, stdout=subprocess.DEVNULL)),
+                      run_op("positive control: cat <decoy>", lambda: subprocess.run(["cat", os.path.join(repo, ".env")], check=True, stdout=subprocess.DEVNULL), poll_positive=True),
                   ]
+
+                  tool_env = {
+                      **os.environ,
+                      "HOME": fake_home,
+                      "GIT_TERMINAL_PROMPT": "0",
+                      "npm_config_cache": os.path.join(base, "npm-cache"),
+                  }
+                  pip_bin = shutil.which("pip3") or shutil.which("pip")
+                  pip_cmd = [pip_bin, "list"] if pip_bin else [sys.executable, "-m", "pip", "list"]
+
+                  tool_results = [
+                      run_op("npm config ls", lambda: subprocess.run(["npm", "config", "ls"], env=tool_env, cwd=npm_proj, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)),
+                      run_op("npm ls (in project dir)", lambda: subprocess.run(["npm", "ls"], env=tool_env, cwd=npm_proj, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)),
+                      run_op("pip list", lambda: subprocess.run(pip_cmd, env=tool_env, cwd=npm_proj, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)),
+                      run_op("git credential fill", lambda: subprocess.run(["git", "credential", "fill"], input=b"protocol=https\nhost=github.com\n\n", env=tool_env, cwd=npm_proj, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10, check=False)),
+                      run_op("docker --version", lambda: subprocess.run(["docker", "--version"], env=tool_env, cwd=npm_proj, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)),
+                  ]
+
                   stop_watcher(proc, logf)
-                  for r in results[:-1]:
+                  for r in non_config_results[:-1]:
                       assert r["events_delta"] == 0, f"Unexpected false positive in {r}"
-                  assert results[-1]["events_delta"] >= 1, f"Positive control failed: {results[-1]}"
-                  return results
+                  assert non_config_results[-1]["events_delta"] >= 1, f"Positive control failed: {non_config_results[-1]}"
+                  return {
+                      "non_config_ops": non_config_results,
+                      "legitimate_config_tools": tool_results,
+                  }
               finally:
                   shutil.rmtree(base, ignore_errors=True)
 
@@ -784,7 +859,7 @@ jobs:
 
           python3 -m py_compile "$RUNNER_TEMP/bench_suite.py"
           python3 "$RUNNER_TEMP/bench_suite.py" tier2 "$RUNNER_TEMP/bench_t2.json"
-          sudo sh -c 'ulimit -n 65536; exec "$@"' _ python3 "$RUNNER_TEMP/bench_suite.py" tier1 "$RUNNER_TEMP/bench_t1.json"
+          sudo env "PATH=$PATH" sh -c 'ulimit -n 65536; exec "$@"' _ python3 "$RUNNER_TEMP/bench_suite.py" tier1 "$RUNNER_TEMP/bench_t1.json"
           sudo chown "$(id -u):$(id -g)" "$RUNNER_TEMP/bench_t1.json"
 
       - name: Upload benchmark results artifact
