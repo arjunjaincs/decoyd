@@ -1,77 +1,66 @@
-# Catching an npm Package Reading Decoy Credentials — Technical Notes
+# Catching an npm Postinstall Script Reading Decoy Credentials
 
-> **DRAFT** — Contains measured Tier 2 (`inotify`) results from our WSL2 test host.
-> Items marked **UNKNOWN** require root/`fanotify` execution on a privileged Linux host.
+This post traces a live end-to-end run of Decoyd Tier 1 (`fanotify` + `inotify`) catching
+`examples/demo-evil-pkg` during `npm install` on `ubuntu-latest` in GitHub Actions, shows the
+exact JSON records and process chains captured in CI artifacts, and reports the measured
+latency, memory, CPU, and false-positive numbers from the same runner environment.
 
-## The Problem
+---
 
-A malicious npm `postinstall` script runs automatically during `npm install` (unless `--ignore-scripts`
-is set) and executes with the installing user's file permissions, allowing it to read files like
-`~/.npmrc`, `~/.pypirc`, or `~/.aws/credentials`.
+## 1. The Threat Flow (`examples/demo-evil-pkg`)
 
-## Decoyd's Design
+When `npm install` installs a package without `--ignore-scripts`, `npm` executes the
+package's `postinstall` script (`examples/demo-evil-pkg/package.json` defines
+`"postinstall": "node postinstall.js"`). In our benign fixture
+(`examples/demo-evil-pkg/postinstall.js`), the script scans eight credential paths under
+`$HOME` (`~/.npmrc`, `~/.pypirc`, `~/.docker/config.json`, `~/.git-credentials`, `~/.netrc`,
+`~/.ssh/id_rsa`, `~/.vault-token`, `~/.cursor/mcp.json`) using `fs.readFileSync`, prints
+byte counts, and discards the contents.
 
-Decoyd generates realistic-looking decoy credential files containing **no static identifiers** (checked
-by an entropy-stripped denylist in `internal/tokens/tokens_test.go`), deploys them cleanly without
-following symlinks (`O_NOFOLLOW | O_EXCL` on Linux), and alerts when a decoy file is accessed:
+In the CI `npm-e2e` job (run [`43162675883`](https://github.com/arjunjaincs/decoyd/actions/runs/43162675883),
+job `Real npm end-to-end (Tier 1 fanotify)`):
 
-- **Tier 1 (`fanotify`, Linux root / `CAP_SYS_ADMIN`)**: hybrid `FAN_CLASS_NOTIF` (`FAN_OPEN|FAN_ACCESS`,
-  never `*_PERM`) + `inotify` (write/move/delete + parent-dir recreate). Enriches events with `/proc/<pid>/`
-  attribution (`pid`, `ppid` chain up to depth 8, `comm`, `exe`, `cmdline`, `cwd`, `uid`, `start_ticks`,
-  `exe_sha256` <= 100 MB) and reads only `npm_package_name`, `npm_package_version`, and `npm_lifecycle_event`
-  from `/proc/<pid>/environ`.
-- **Tier 2 (`inotify` on Linux / `fsnotify` on Windows, unprivileged)**: detects file events and reports
-  token identity without process attribution. Note that on Windows, `ReadDirectoryChangesW` reports writes,
-  renames, and deletes only (not pure read-only opens).
+1. We seed `~/.pypirc` and `~/.vault-token` (`0600`) and register them in `deployed_tokens.json`
+   (we omit `~/.npmrc` in this job because `npm` itself reads `~/.npmrc` on startup even
+   under `--ignore-scripts`).
+2. `sudo decoyd watch --tier1 --data-dir "$DATA_DIR"` starts in the background and logs
+   `decoyd watch started — monitoring 2 tokens`.
+3. **Negative control**: `npm install --no-save --ignore-scripts "$GITHUB_WORKSPACE/examples/demo-evil-pkg"`
+   followed by a `2.6 s` wait leaves `$DATA_DIR/triggers.jsonl` empty (`0` events).
+4. **Positive test**: `npm install --no-save "$GITHUB_WORKSPACE/examples/demo-evil-pkg"` executes
+   `node postinstall.js` and triggers detection in Tier 1.
 
-## Usage
+---
 
-Generate and deploy decoy tokens using the interactive TUI (`decoyd`), or inspect headless state under a
-data directory containing `deployed_tokens.json` and `alert_config.json`:
+## 2. Actual Event JSON Captured in CI
 
-```bash
-# Install
-go install github.com/arjunjaincs/decoyd/cmd/decoyd@latest
+### Case A — `postinstall.js` Reading `~/.pypirc` (CI Run [`43162675883`](https://github.com/arjunjaincs/decoyd/actions/runs/43162675883))
 
-# Launch TUI to generate & deploy decoy credential files
-decoyd
-
-# Start headless watcher (Tier 2 unprivileged, or Tier 1 on Linux with sudo)
-decoyd watch                # Tier 2 (inotify/fsnotify)
-sudo decoyd watch --tier1   # Tier 1 (fanotify; errors if unavailable)
-
-# Simulate a benign credential-scanning npm postinstall hook
-npm install --no-save ./examples/demo-evil-pkg
-
-# Inspect events (table or raw TriggerEvent JSON) and fail CI builds if triggered
-decoyd events --json
-decoyd events --fail-if-any  # exits 3 if events exist
-```
-
-An actual Tier 1 `TriggerEvent` record uses this structure (see [EVENT-SCHEMA.md](../EVENT-SCHEMA.md)):
+From the `npm-e2e-events` artifact (`npm-e2e-triggers.jsonl`) produced by `npm-e2e`:
 
 ```json
 {
-  "id": "8f4a2c1e9b3d7a05",
-  "token_id": "tok-abc123",
-  "token_type": "aws_credentials",
-  "path": "/home/runner/.aws/credentials",
-  "triggered_at": "2026-11-10T10:00:05Z",
+  "id": "deb7cdbd28c0b4fe",
+  "token_id": "npm-e2e-pypirc",
+  "token_type": "pypirc",
+  "path": "/home/runner/.pypirc",
+  "triggered_at": "2026-11-12T05:38:38.390932373Z",
   "event_type": "access",
-  "status": "sent",
+  "status": "failed",
+  "alert_error": "no alert channel configured",
   "watcher_tier": "tier1",
   "attribution": {
     "accessor": {
-      "pid": 4567,
-      "ppid": 4000,
+      "pid": 4465,
+      "ppid": 4464,
       "comm": "node",
-      "exe": "/usr/bin/node",
-      "cmdline": "node install.js",
-      "cwd": "/tmp/evil-pkg",
+      "exe": "",
+      "cmdline": "node postinstall.js",
+      "cwd": "/home/runner/work/decoyd/decoyd/examples/demo-evil-pkg",
       "uid": 1001,
-      "start_ticks": 998877
+      "start_ticks": 5218
     },
-    "confidence": 3,
+    "confidence": 1,
     "npm_package": "demo-evil-pkg",
     "npm_version": "0.0.1",
     "npm_lifecycle_event": "postinstall"
@@ -79,35 +68,146 @@ An actual Tier 1 `TriggerEvent` record uses this structure (see [EVENT-SCHEMA.md
 }
 ```
 
-## Measured Performance (`6.18.58.1-microsoft-standard-WSL2`, i7-1265U, `go1.25.0`) [RAN]
+Here Decoyd captured `comm: "node"`, `cmdline: "node postinstall.js"`,
+`cwd: "/home/runner/work/decoyd/decoyd/examples/demo-evil-pkg"`, `npm_package: "demo-evil-pkg"`,
+`npm_version: "0.0.1"`, and `npm_lifecycle_event: "postinstall"`. Because `node postinstall.js`
+finished reading and exited while `collectProcess` (`internal/watch/procinfo_linux.go`) ran,
+the post-collection `/proc/4465/stat` re-check could no longer confirm `starttime`; by design,
+Decoyd cleared `exe`/`exe_sha256` and recorded `"confidence": 1` (`low`) rather than risk
+attributing a reused PID.
 
-All measurements below were collected against compiled `decoyd watch` (Tier 2 `inotify`, default `2s`
-per-path debounce). Tier 1 (`fanotify`) end-to-end benchmark figures are **UNKNOWN** locally because
-this WSL2 test environment did not permit non-interactive `sudo` (`FAN_CLASS_NOTIF`).
+### Case B — Full Ancestor Chain & Exit Code `3` in `.github/workflows/demo.yml` (CI Run [`43162675881`](https://github.com/arjunjaincs/decoyd/actions/runs/43162675881))
 
-### Time-to-Alert (100 sequential child `cat` reads -> local HTTP webhook)
+When the reading process stays alive long enough for pre/post `starttime` verification and the
+`/proc/<pid>/stat` parent walk, Decoyd records the full process chain (`demo-events` artifact,
+`demo-events.json`):
 
-- **p50**: `2008.90 ms` [RAN]
-- **p95**: `2011.19 ms` (rank 95/100; rank 96: `2011.34 ms`) [RAN]
-- **Max**: `2063.36 ms` [RAN]
-- **Min / Mean**: `2005.76 ms` / `2009.31 ms` [RAN]
-- **Tier 1 (`fanotify`)**: **UNKNOWN** — run `sudo -E decoyd watch --tier1 --data-dir <dir>` on a Linux host with `FAN_CLASS_NOTIF`.
+```json
+{
+  "id": "cc0d0fd6ffa0eddd",
+  "token_id": "demo-npmrc-tok1",
+  "token_type": "npmrc",
+  "path": "/home/runner/.npmrc",
+  "triggered_at": "2026-11-12T05:38:35.190894402Z",
+  "event_type": "access",
+  "status": "failed",
+  "alert_error": "no alert channel configured",
+  "watcher_tier": "tier1",
+  "attribution": {
+    "accessor": {
+      "pid": 4418,
+      "ppid": 4416,
+      "comm": "npm",
+      "exe": "/opt/hostedtoolcache/node/20.20.2/x64/bin/node",
+      "cmdline": "npm",
+      "cwd": "/home/runner/work/_temp/demo-pkg-install",
+      "uid": 1001,
+      "start_ticks": 23700,
+      "exe_sha256": "6295488653f0d93b0a157841746fef7e72cc4328cfb60c4bbe0ca2668a836ffd"
+    },
+    "ancestors": [
+      {
+        "pid": 4416,
+        "ppid": 2060,
+        "comm": "bash",
+        "exe": "/usr/bin/bash",
+        "cmdline": "/usr/bin/bash -e /home/runner/work/_temp/2654bede-9277-4860-88c1-6809e887c90a.sh",
+        "cwd": "/home/runner/work/_temp/demo-pkg-install",
+        "uid": 1001,
+        "start_ticks": 23700,
+        "exe_sha256": "450c68376d14e5040d36cce58605c35b2211d244f3079297440dc9d602ee4994"
+      },
+      {
+        "pid": 2060,
+        "ppid": 2040,
+        "comm": "Runner.Worker",
+        "exe": "/home/runner/actions-runner/cached/2.338.2/bin/Runner.Worker",
+        "cmdline": "/home/runner/actions-runner/cached/2.338.2/bin/Runner.Worker spawnclient 142 145",
+        "cwd": "/home/runner/actions-runner/cached/2.338.2/bin",
+        "uid": 1001,
+        "start_ticks": 20436,
+        "exe_sha256": "9cb30f90c9473025facb2856310483c338b88d5873649e76bfbe3a0f0182103d"
+      },
+      {
+        "pid": 2040,
+        "ppid": 1965,
+        "comm": "Runner.Listener",
+        "exe": "/home/runner/actions-runner/cached/2.338.2/bin/Runner.Listener",
+        "cmdline": "/home/runner/actions-runner/cached/2.338.2/bin/Runner.Listener run",
+        "cwd": "/",
+        "uid": 1001,
+        "start_ticks": 20275,
+        "exe_sha256": "433782c36a44447fc19e541f786981ce222f78755345c59e02b50689ec2ad2ac"
+      },
+      {
+        "pid": 1965,
+        "ppid": 1,
+        "comm": "hosted-compute-",
+        "exe": "/opt/hca/hosted-compute-agent",
+        "cmdline": "/opt/hca/hosted-compute-agent",
+        "cwd": "/",
+        "uid": 1001,
+        "start_ticks": 1418,
+        "exe_sha256": "e6294d28ce5d563b1e7dd03f24175c8532bf1bc246df3e5ecf43e3a7aa126255"
+      }
+    ],
+    "confidence": 3
+  }
+}
+```
 
-(The `~2000 ms` floor comes directly from the default `2s` per-path debounce timer before webhook dispatch.)
+The process chain in `demo-events.json` walks cleanly up to PPID 1:
+`npm (4418)` <- `bash (4416)` <- `Runner.Worker (2060)` <- `Runner.Listener (2040)` <- `hosted-compute-agent (1965)`,
+with `"confidence": 3` (`high`) and a SHA-256 binary digest for every process in the chain, and
+`decoyd events --fail-if-any` exited with status `3`.
 
-### Idle Memory (RSS) and CPU Over 30 Seconds
+---
 
-- **1 decoy**: `10.90 MiB` avg RSS (`11,162 KiB`, range `11,160–11,172 KiB`), `0.033% CPU` (`1` tick / `30.02s`) [RAN]
-- **100 decoys**: `11.21 MiB` avg RSS (`11,474 KiB`, range `11,464–11,476 KiB`), `0.067% CPU` (`2` ticks / `30.02s`) [RAN]
-- **1000 decoys**: `12.52 MiB` avg RSS (`12,823 KiB`, range `12,780–12,844 KiB`), `0.033% CPU` (`1` tick / `30.02s`) [RAN]
+## 3. Measured Numbers (CI Run [`43161750870`](https://github.com/arjunjaincs/decoyd/actions/runs/43161750870))
 
-### False-Positive Observations (Tier 2 `inotify`)
+All measurements below were recorded in the `Benchmarks` CI job (`ubuntu26`, kernel
+`7.0.0-1019-azure`, AMD EPYC 7763 4 vCPUs, `go1.27.4`), artifact `tier1-benchmarks`
+(full methodology in [BENCHMARKS.md](../BENCHMARKS.md)):
 
-Zero webhook alerts fired across `ls -la`, `stat`, `find`, `git status`, `grep -r` in a sibling directory,
-and a 50-iteration `lstat`/`stat` loop; the `cat` positive control fired `1` alert [RAN].
+- **Time-to-alert over 100 runs** (child open/read -> `triggers.jsonl`):
+  - **Tier 1 (`fanotify`)**: `min = 6.493 ms`, `p50 = 7.677 ms`, `mean = 7.804 ms`,
+    `p95 = 8.526 ms` (rank 95) / `8.577 ms` (rank 96), `max = 35.084 ms`.
+  - **Tier 2 (`inotify`, `2 s` debounce)**: `min = 2000.952 ms`, `p50 = 2003.355 ms`,
+    `mean = 2003.187 ms`, `p95 = 2004.653 ms` (rank 95) / `2004.684 ms` (rank 96),
+    `max = 2007.110 ms`.
+- **Tier 1 idle RSS and CPU over 30 s** (`USER_HZ = 100`, `wall_s = 30.006 s`):
+  - **1 decoy**: `11.35 MiB` avg RSS (`11,622.7 KiB`), `0.0000%` CPU (`0` ticks).
+  - **100 decoys**: `11.54 MiB` avg RSS (`11,816.3 KiB`), `0.0333%` CPU (`1` tick).
+  - **1,000 decoys**: `13.76 MiB` avg RSS (`14,092.9 KiB`), `0.0000%` CPU (`0` ticks).
+- **Tier 1 false-positive suite** (`2.6 s` settle per operation):
+  - `0` events for `ls -la`, `stat` on decoys, `find -maxdepth 3`, `git status` inside a
+    repo containing `.npmrc`/`.env`/`.aws/credentials`, `grep -rn` on a sibling directory,
+    and a 50-iteration `lstat`/`stat` loop.
+  - `2` JSONL lines (`pending` + `sent`, 1 webhook delivery) for the `cat .env` positive control.
 
-## Current Status
+The full `systemd` lifecycle (`install --system`, `systemd-analyze verify`, child read attribution,
+unprivileged `decoyd events --json`, `sync`, and `uninstall --system`) also passes on `ubuntu-latest`
+in the `System lifecycle proof` CI job (`43162675883`).
 
-Tier 1 `fanotify` lifecycle proof (`install --system`, `systemctl status`, child decoy read, `triggers.jsonl`
-schema check, unprivileged `decoyd events --json`, `sync`, and `uninstall --system`) runs in the GitHub
-Actions `system-lifecycle` CI job on `ubuntu-latest`.
+---
+
+## 4. Limitations
+
+- **Read methods and timing**: Tier 1 observes VFS `FAN_OPEN|FAN_ACCESS` and Tier 2 observes
+  `IN_OPEN|IN_ACCESS`/`IN_MODIFY`/`IN_MOVE_SELF`/`IN_DELETE_SELF` (`internal/watch/watch_linux.go`).
+  Raw block-device reads, `/proc/<pid>/mem` reads, offline disk copies, or remote network
+  filesystems (NFS, SMB, 9p/drvfs) can bypass local file notifications. Because `/proc`
+  attribution runs asynchronously in `FAN_CLASS_NOTIF` (`internal/watch/procinfo_linux.go`),
+  sub-millisecond processes that exit during collection drop to `confidence: 1` without `exe`
+  or ancestor chains (intentional anti-PID-reuse behavior, as seen in Case A above).
+- **Root attacker**: Tier 1 runs `decoyd watch --tier1` as root / `CAP_SYS_ADMIN` (with
+  systemd capability bounding and `ProtectSystem=strict` in `cmd/decoyd/cmd_install_system_linux.go`).
+  An attacker who already has root can stop the daemon, tamper with `/var/lib/decoyd/triggers.jsonl`,
+  or bypass VFS watches via raw block devices. Decoyd targets unprivileged or user-level
+  compromise such as malicious package scripts running under a developer account.
+- **Windows read gap**: On Windows, `internal/watch/watch_windows.go` uses `fsnotify`
+  (`ReadDirectoryChangesW`), which surfaces writes, renames, and deletes only—pure read-only
+  file opens (such as `fs.readFileSync` on Windows) are not detected in v1.
+- **npm only**: Package attribution in `internal/watch/procinfo_linux.go` (`ReadEnvFiltered`)
+  reads only `npm_package_name`, `npm_package_version`, and `npm_lifecycle_event` from
+  `/proc/<pid>/environ`. `pnpm` and `yarn` are untested, and `pip` is not supported.
