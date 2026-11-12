@@ -4,39 +4,35 @@
 //
 // Reparse-point (symlink/junction) refusal:
 // On Windows, O_NOFOLLOW is not available through the standard library.
-// Instead we use Lstat + check for ModeSymlink before calling openExclNoFollow.
-// If the target path is a symlink or junction (reparse point), deploy refuses
-// with ErrReparsePoint to prevent symlink-following attacks.
-//
-// Note: Detecting NTFS junctions requires checking IO_REPARSE_TAG_MOUNT_POINT
-// via DeviceIoControl, which requires a Windows syscall not available in pure
-// Go without CGO or windows system packages. This is documented as a known
-// limitation; we refuse os.ModeSymlink (which covers standard symlinks) and
-// log that full junction detection requires a Windows CI privileged test.
-// See: https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-fsctl_get_reparse_point
-//
-// UNKNOWN: Full junction refusal cannot be tested without a real Windows host.
-// The privileged integration test for this is documented in the CI spec (B12).
+// Instead we query Win32 file attributes via GetFileAttributes (checking
+// FILE_ATTRIBUTE_REPARSE_POINT) as well as os.Lstat ModeSymlink before calling
+// os.OpenFile(O_CREATE|O_EXCL|O_WRONLY). This detects file symlinks, directory
+// symlinks, and NTFS junctions (IO_REPARSE_TAG_MOUNT_POINT / mklink /J).
+// Ref: https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getfileattributesw
 package deploy
 
 import (
 	"errors"
 	"fmt"
 	"os"
+
+	"golang.org/x/sys/windows"
 )
 
 // ErrReparsePoint is returned when the target path is a symlink or reparse point.
 var ErrReparsePoint = errors.New("deploy: target is a symlink or reparse point")
 
 // openExclNoFollow opens path for exclusive creation on Windows.
-// If the path already exists as a symlink, returns ErrReparsePoint.
-// Full NTFS junction detection (IO_REPARSE_TAG_MOUNT_POINT) requires
-// DeviceIoControl and is UNKNOWN without a real Windows host.
+// If path is an existing symlink or NTFS reparse point (including junctions),
+// returns ErrReparsePoint without opening or traversing it.
 func openExclNoFollow(path string, perm os.FileMode) (*os.File, error) {
-	// Lstat gives us the link itself, not what it points to.
-	fi, err := os.Lstat(path)
-	if err == nil {
-		// Path already exists.
+	if p16, uerr := windows.UTF16PtrFromString(path); uerr == nil {
+		attrs, gerr := windows.GetFileAttributes(p16)
+		if gerr == nil && attrs&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+			return nil, fmt.Errorf("%w: %s", ErrReparsePoint, path)
+		}
+	}
+	if fi, err := os.Lstat(path); err == nil {
 		if fi.Mode()&os.ModeSymlink != 0 {
 			return nil, fmt.Errorf("%w: %s", ErrReparsePoint, path)
 		}

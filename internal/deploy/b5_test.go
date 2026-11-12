@@ -1,9 +1,11 @@
 package deploy_test
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 
@@ -99,34 +101,66 @@ func TestDeploy_SSHPubRollbackOnFailure(t *testing.T) {
 	}
 }
 
-// ── B5: Windows reparse-point refusal ────────────────────────────────────────
-// (see deploy_b5_windows_test.go — build-tagged; this stub runs on Linux)
+// ── B5: Root writing outside system directories — warning ─────────────────────
 
-// TestDeploy_ReparsePointRefusal_Stub documents that Windows reparse-point
-// refusal is tested in deploy_b5_windows_test.go (build-tagged for windows).
-func TestDeploy_ReparsePointRefusal_Stub(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("covered by deploy_b5_windows_test.go on Windows")
-	}
-	t.Log("Windows reparse-point refusal test is in deploy_b5_windows_test.go")
-}
-
-// ── B5: Root writing outside home — warning ───────────────────────────────────
-
-// TestDeploy_RootOutsideHomeWarning verifies that deploying as root to a path
-// outside the user's home directory logs a warning.
-// On non-Linux or non-root we just verify the helper exports exist.
+// TestDeploy_RootOutsideHomeWarning verifies via injectable UID/writer hooks
+// that deploying as root outside /var/lib/decoyd and /etc/decoyd emits a warning
+// in normal unprivileged CI, while system-managed paths and non-root do not.
 func TestDeploy_RootOutsideHomeWarning(t *testing.T) {
-	if os.Getuid() != 0 {
-		t.Skip("root outside-home warning test requires running as root (use sudo go test)")
-	}
-	dir := t.TempDir()
 	tok := makeTestToken(tokens.TypeEnvSecrets)
-	// Deploy to /tmp (outside home).
-	_, err := deploy.DeployToFile(tok, dir, deploy.Options{})
-	// No error expected; the warning goes to stderr.
-	// We can only verify no panic and the file exists.
-	if err != nil {
-		t.Logf("deploy error (may be expected in test env): %v", err)
-	}
+
+	t.Run("root_outside_system_dir_warns", func(t *testing.T) {
+		var buf bytes.Buffer
+		restore := deploy.SetRootWarnDepsForTest(func() int { return 0 }, &buf)
+		defer restore()
+
+		dir := t.TempDir()
+		if _, err := deploy.DeployToFile(tok, dir, deploy.Options{}); err != nil {
+			t.Fatalf("DeployToFile: %v", err)
+		}
+		got := buf.String()
+		if !strings.Contains(got, "warning: running as root") || !strings.Contains(got, "outside system-managed directories") {
+			t.Errorf("expected root warning on stderr buffer, got %q", got)
+		}
+	})
+
+	t.Run("root_prefix_lookalike_warns", func(t *testing.T) {
+		var buf bytes.Buffer
+		restore := deploy.SetRootWarnDepsForTest(func() int { return 0 }, &buf)
+		defer restore()
+
+		lookalike := filepath.Join(t.TempDir(), "decoyd-not-system")
+		_, _ = deploy.DeployToFile(tok, lookalike, deploy.Options{DryRun: true})
+		if !strings.Contains(buf.String(), "warning: running as root") {
+			t.Errorf("expected warning for lookalike dir %s, got %q", lookalike, buf.String())
+		}
+	})
+
+	t.Run("root_inside_system_dir_silent", func(t *testing.T) {
+		var buf bytes.Buffer
+		restore := deploy.SetRootWarnDepsForTest(func() int { return 0 }, &buf)
+		defer restore()
+
+		sysPath := "/var/lib/decoyd/nonexistent-test-subdir"
+		if _, err := os.Stat(filepath.Join(sysPath, tok.Filename)); err == nil {
+			t.Skip("unexpected pre-existing file under system dir")
+		}
+		_, _ = deploy.DeployToFile(tok, sysPath, deploy.Options{DryRun: true})
+		if buf.Len() != 0 {
+			t.Errorf("expected no warning for %s, got %q", sysPath, buf.String())
+		}
+	})
+
+	t.Run("non_root_silent", func(t *testing.T) {
+		var buf bytes.Buffer
+		restore := deploy.SetRootWarnDepsForTest(func() int { return 1000 }, &buf)
+		defer restore()
+
+		if _, err := deploy.DeployToFile(tok, t.TempDir(), deploy.Options{DryRun: true}); err != nil {
+			t.Fatalf("DeployToFile(DryRun): %v", err)
+		}
+		if buf.Len() != 0 {
+			t.Errorf("expected no warning for non-root UID, got %q", buf.String())
+		}
+	})
 }
