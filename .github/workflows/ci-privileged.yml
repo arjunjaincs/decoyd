@@ -258,6 +258,9 @@ jobs:
       - name: Test (Windows)
         run: go test -race -count=3 ./...
 
+      - name: Windows deploy & root warning verbose proof
+        run: go test -v -run 'TestDeploy_Windows|TestDeploy_RootOutsideHome' ./internal/deploy/
+
       - name: vet
         run: go vet ./...
 
