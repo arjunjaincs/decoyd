@@ -41,7 +41,9 @@ decoyd events --fail-if-any   # exit 3 if anything was caught (use in CI)
 
 > **Package-manager attribution scope:** Tier 1 package attribution reads only npm lifecycle environment variables (`npm_package_name`, `npm_package_version`, `npm_lifecycle_event`) from `/proc/<pid>/environ`. `pnpm` and `yarn` are untested, and `pip` is not supported.
 >
-> **Detection latency (event recorded in `triggers.jsonl`):** In [CI benchmarks](docs/BENCHMARKS.md), time from a child process reading a decoy file to the event recorded in `triggers.jsonl` over 100 runs was `7.677 ms` p50 (`8.526`–`8.577 ms` p95) for Tier 1 `fanotify` and `2003.355 ms` p50 (`2004.653`–`2004.684 ms` p95) for Tier 2 `inotify` (2 s per-path debounce).
+> **Known false positives:** legitimate tools reading their own config at default paths (such as `npm config ls`, `npm ls`, `git credential fill`, and `docker --version` when `~/.npmrc`, `~/.git-credentials`, or `~/.docker/config.json` is a decoy) trigger Decoyd because VFS monitors observe every read regardless of caller. See [BENCHMARKS.md](docs/BENCHMARKS.md) for measured Tier 1 tool results.
+>
+> **Detection latency (event recorded in `triggers.jsonl`):** In [CI benchmarks](docs/BENCHMARKS.md), time from a child process reading a decoy file to the event recorded in `triggers.jsonl` over 100 runs was `4.778 ms` p50 (`5.930`–`5.983 ms` p95) for Tier 1 `fanotify` and `2002.732 ms` p50 (`2003.693`–`2003.753 ms` p95) for Tier 2 `inotify` (2 s per-path debounce).
 
 ---
 
@@ -129,9 +131,18 @@ Decoyd was built with AI coding agents under human review. The verifiable eviden
 build, security scanning, cross-platform tests, `systemd` lifecycle behavior, npm Tier 1
 attribution, and benchmarks is the automated GitHub Actions CI history:
 
-- [`CI` (Linux & Windows matrix, govulncheck, gosec, staticcheck, vet)](https://github.com/arjunjaincs/decoyd/actions/workflows/ci.yml) — run [`43162675839`](https://github.com/arjunjaincs/decoyd/actions/runs/43162675839)
-- [`CI — Privileged and Windows` (`fanotify`, `npm-e2e`, `system-lifecycle`, `benchmarks`)](https://github.com/arjunjaincs/decoyd/actions/workflows/ci-privileged.yml) — runs [`43161750870`](https://github.com/arjunjaincs/decoyd/actions/runs/43161750870), [`43162675883`](https://github.com/arjunjaincs/decoyd/actions/runs/43162675883)
-- [`Decoyd Demo (Tier 1 npm Credential Access)`](https://github.com/arjunjaincs/decoyd/actions/workflows/demo.yml) — run [`43162675881`](https://github.com/arjunjaincs/decoyd/actions/runs/43162675881)
+- [`CI` (Linux & Windows matrix, govulncheck, gosec, staticcheck, vet)](https://github.com/arjunjaincs/decoyd/actions/workflows/ci.yml) — run [`43172569745`](https://github.com/arjunjaincs/decoyd/actions/runs/43172569745)
+- [`CI — Privileged and Windows` (`fanotify`, `npm-e2e`, `system-lifecycle`, `benchmarks`)](https://github.com/arjunjaincs/decoyd/actions/workflows/ci-privileged.yml) — run [`43172569783`](https://github.com/arjunjaincs/decoyd/actions/runs/43172569783)
+- [`Decoyd Demo (Tier 1 npm Credential Access)`](https://github.com/arjunjaincs/decoyd/actions/workflows/demo.yml) — run [`43172564530`](https://github.com/arjunjaincs/decoyd/actions/runs/43172564530)
+
+---
+
+## Roadmap (v1.1)
+
+- Allowlist & learning mode (reduce known false positives when legitimate developer tools read default config paths)
+- Package-manager attribution for `pnpm`, `yarn`, and `pip`
+- Windows read-only open detection via ETW
+- Live Wazuh 4.x and Sigma validation against sample `TriggerEvent` logs
 
 ---
 
@@ -140,18 +151,18 @@ attribution, and benchmarks is the automated GitHub Actions CI history:
 Every tagged release published by [`.github/workflows/release.yml`](.github/workflows/release.yml) includes GoReleaser archives, SPDX-2.3 SBOMs (`*.sbom.json`), `checksums.txt`, and a keyless Sigstore `cosign` signature + certificate (`checksums.txt.sig`, `checksums.txt.pem`).
 
 ```bash
-# Download the release archives, SBOMs, checksums, and signature (example: v1.0.0-rc.1)
-gh release download v1.0.0-rc.1 --repo arjunjaincs/decoyd
+# Download the release archives, SBOMs, checksums, and signature (example: v1.0.0)
+gh release download v1.0.0 --repo arjunjaincs/decoyd
 
 # 1. Verify archive and SBOM SHA-256 digests
 sha256sum -c checksums.txt
 
 # 2. Verify the keyless Sigstore cosign signature on checksums.txt
-# Replace <tag> (e.g., v1.0.0-rc.1) with the release tag you downloaded
+# Replace <tag> (e.g., v1.0.0) with the release tag you downloaded
 cosign verify-blob \
   --certificate checksums.txt.pem \
   --signature checksums.txt.sig \
-  --certificate-identity "https://github.com/arjunjaincs/decoyd/.github/workflows/release.yml@refs/tags/v1.0.0-rc.1" \
+  --certificate-identity "https://github.com/arjunjaincs/decoyd/.github/workflows/release.yml@refs/tags/v1.0.0" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
   checksums.txt
 

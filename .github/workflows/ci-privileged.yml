@@ -4,6 +4,7 @@
 name: CI — Privileged and Windows
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - 'batch/**'
@@ -98,7 +99,7 @@ jobs:
           test -f /etc/systemd/system/decoyd.service
 
           sudo systemd-analyze verify /etc/systemd/system/decoyd.service
-          sudo systemctl status decoyd.service --no-page
+          sudo systemctl status decoyd.service --no-pager
 
       - name: Trigger decoy read by child process and verify attribution + unprivileged events
         run: |
@@ -219,7 +220,7 @@ jobs:
           sudo /usr/local/bin/decoyd sync --data-dir "$TMP_DATA"
           sudo test -f /etc/decoyd/alert_config.json
           test "$(sudo stat -c '%a' /etc/decoyd/alert_config.json)" = "600"
-          sudo systemctl status decoyd.service --no-page
+          sudo systemctl status decoyd.service --no-pager
 
           sudo /usr/local/bin/decoyd uninstall --system
           test ! -e /etc/systemd/system/decoyd.service
@@ -286,7 +287,7 @@ jobs:
       - name: Build decoyd
         run: go build -o /tmp/decoyd ./cmd/decoyd
 
-      - name: Seed decoys and start Tier 1 watche
+      - name: Seed decoys and start Tier 1 watcher
         run: |
           DATA_DIR="$RUNNER_TEMP/decoyd-npm-e2e"
           mkdir -p "$DATA_DIR"
@@ -399,7 +400,7 @@ jobs:
             /tmp/decoyd-npm-watch.log
           if-no-files-found: ignore
 
-      - name: Stop watche
+      - name: Stop watcher
         if: always()
         run: |
           sudo pkill -TERM -f '/tmp/decoyd watch --tier1' || true
@@ -433,7 +434,7 @@ jobs:
             echo "=== uname -a ==="
             uname -a
             echo "=== uname -r ==="
-            uname -
+            uname -r
             echo "=== go version ==="
             go version
             echo "=== runner image env ==="

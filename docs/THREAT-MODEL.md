@@ -5,7 +5,7 @@
 This document covers the Decoyd binary running on a single Linux or Windows host.
 
 **Tier 1** (Linux, root / `CAP_SYS_ADMIN`): hybrid fanotify (`FAN_CLASS_NOTIF`) + inotify watcher with `/proc` process attribution.
-ADR 0001 is ACCEPTED. Tier 1 is **implemented** on `batch/tier1-v1`.
+ADR 0001 is ACCEPTED. Tier 1 implemented in v1.0.
 
 **Tier 2** (Linux/Windows, no root): inotify/fsnotify-based watcher with token identity only (no process attribution).
 
@@ -80,3 +80,4 @@ ADR 0001 is ACCEPTED. Tier 1 is **implemented** on `batch/tier1-v1`.
 - **Root Tier-1 (`fanotify`) scope**: catches VFS `open`/`access` across users via `FAN_OPEN|FAN_ACCESS`, but offline disk image copies or raw block-device reads still bypass VFS.
 - **Short-lived processes in `/proc` attribution**: attribution runs asynchronously in the dispatch worker (not a blocking `FAN_*_PERM` hook), so a process that exits before `/proc/<pid>/` is read may have partial metadata (`ConfidenceLow`).
 - **Network filesystems** (NFS, SMB, 9p/drvfs): `inotify`/`fanotify` events are generally not generated for remote accesses on network mounts. `decoyd doctor` warns on `v9fs` (9p), `cifs`, and `fuseblk`/`drvfs` filesystems, but cannot prevent silent blind spots on all remote mounts.
+- **Known false positives**: legitimate tools reading their own config at default paths (for example `npm config ls` and `npm ls` reading `~/.npmrc`, `git credential fill` reading `~/.git-credentials`, and `docker --version` reading `~/.docker/config.json`) trigger Decoyd because kernel `fanotify`/`inotify` observe all VFS reads to monitored decoy files regardless of caller process (no allowlist is implemented in v1.0).

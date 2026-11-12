@@ -2,17 +2,17 @@
 
 Every number below marked **[RAN]** was measured directly in an execution run on the
 host environment listed in its section and stored as an immutable artifact (CI run
-[`43161750870`](https://github.com/arjunjaincs/decoyd/actions/runs/43161750870), job
+[`43172569783`](https://github.com/arjunjaincs/decoyd/actions/runs/43172569783), job
 `Benchmarks (Tier 1 fanotify vs Tier 2 inotify)`, artifact `tier1-benchmarks`).
 
 ## Environments [RAN]
 
 ### Environment A — GitHub Actions `ubuntu-latest` CI Runner (`tier1-benchmarks`)
 
-- Runner image: `ubuntu26` (`Ubuntu 26.04.1 LTS (Resolute Raccoon)`, `ImageVersion=20261101.186.1`)
-- Kernel (`uname -r`): `7.0.0-1019-azure` (`#20-Ubuntu SMP PREEMPT Mon Oct 19 22:41:16 UTC 2026 x86_64`)
-- CPU (`lscpu | head -20`): `AMD EPYC 7763 64-Core Processor`, 4 vCPUs (`2` cores × `2` threads, Microsoft Hyper-V full virtualization)
-- Go (`go version`): `go1.27.4 linux/amd64` (module `go 1.25.0`, pinned toolchain `go1.26.10`)
+- Runner image: `ubuntu-26.04` (`Ubuntu 26.04.1 LTS`, `ImageVersion=20261101.186.1`)
+- Kernel (`uname -a`): `7.0.0-1019-azure` (`#20-Ubuntu SMP PREEMPT Mon Oct 19 22:41:16 UTC 2026 x86_64`)
+- CPU: `AMD EPYC 7763 64-Core Processor`, 4 vCPUs (from earlier run on identical `ubuntu-26.04` `20261101.186.1` / `7.0.0-1019-azure` runner)
+- Go (`go version`): `go1.27.4 linux/amd64` (module `go 1.25.0`, pinned toolchain `go1.26.11`)
 - Privilege: `sudo` / `CAP_SYS_ADMIN` (Tier 1 `fanotify`) and unprivileged user (Tier 2 `inotify`)
 
 ### Environment B — Local WSL2 Development Host
@@ -28,7 +28,7 @@ host environment listed in its section and stored as an immutable artifact (CI r
 
 ### CI Runner Apples-to-Apples (`Environment A`: Child Read -> Event Recorded in `triggers.jsonl`) [RAN]
 
-**Measurement method** (`bench_suite.py`, CI run [`43161750870`](https://github.com/arjunjaincs/decoyd/actions/runs/43161750870)):
+**Measurement method** (`bench_suite.py`, CI run [`43172569783`](https://github.com/arjunjaincs/decoyd/actions/runs/43172569783)):
 100 distinct deployed decoy files are monitored by compiled `decoyd watch --tier1`
 (Tier 1) or `decoyd watch` (Tier 2) with a loopback HTTP webhook configured so each
 alert completes full delivery (`pending` -> `sent`). For each decoy `i = 0..99`, the
@@ -41,11 +41,11 @@ appears (`latency_ms = (found_ns - t0) / 1e6`).
 | Metric | Tier 1 (`fanotify`) [RAN] | Tier 2 (`inotify`, `2s` debounce) [RAN] |
 |--------|---------------------------:|----------------------------------------:|
 | Sample size | `100` runs | `100` runs |
-| Min | `6.493 ms` | `2000.952 ms` |
-| p50 (median) | `7.677 ms` | `2003.355 ms` |
-| Mean | `7.804 ms` | `2003.187 ms` |
-| p95 (rank 95 / rank 96) | `8.526 ms` / `8.577 ms` | `2004.653 ms` / `2004.684 ms` |
-| Max | `35.084 ms` | `2007.110 ms` |
+| Min | `4.453 ms` | `2001.343 ms` |
+| p50 (median) | `4.778 ms` | `2002.732 ms` |
+| Mean | `5.212 ms` | `2002.701 ms` |
+| p95 (rank 95 / rank 96) | `5.930 ms` / `5.983 ms` | `2003.693 ms` / `2003.753 ms` |
+| Max | `26.691 ms` | `2003.987 ms` |
 
 Why Tier 2 sits near `2,000 ms`: the `inotify` loop in `internal/watch/watch_linux.go`
 holds file events in a per-path `2 s` debounce map before dispatching (`safeDispatch` ->
@@ -74,11 +74,11 @@ cross-checked with `ps -o rss=,pcpu= -p <pid>`.
 
 ### Tier 1 (`fanotify` + `inotify`, `Environment A` CI Runner) [RAN]
 
-| Decoy count | RSS Min (KiB) | RSS Avg (KiB / MiB) | RSS Max (KiB) | CPU ticks (`delta_ticks` / `30.006 s`) | CPU % (`USER_HZ=100`) | `ps` snapshot (`rss pcpu`) |
-|------------:|--------------:|--------------------:|--------------:|---------------------------------------:|----------------------:|----------------------------|
-| 1 | 11,484 | 11,622.7 (`11.35 MiB`) | 11,664 | 0 ticks (`0.000 s`) | `0.0000%` | `11664  0.0` |
-| 100 | 11,672 | 11,816.3 (`11.54 MiB`) | 11,848 | 1 tick (`0.010 s`) | `0.0333%` | `11848  0.0` |
-| 1,000 | 14,048 | 14,092.9 (`13.76 MiB`) | 14,100 | 0 ticks (`0.000 s`) | `0.0000%` | `14100  0.0` |
+| Decoy count | RSS Min (KiB) | RSS Avg (KiB / MiB) | RSS Max (KiB) | CPU ticks (`delta_ticks` / `30.005–30.006 s`) | CPU % (`USER_HZ=100`) | `ps` snapshot (`rss pcpu`) |
+|------------:|--------------:|--------------------:|--------------:|---------------------------------------------:|----------------------:|----------------------------|
+| 1 | 11,656 | 11,716.1 (`11.44 MiB`) | 11,728 | 0 ticks (`0.000 s`) | `0.0000%` | `11728  0.0` |
+| 100 | 11,944 | 11,979.1 (`11.70 MiB`) | 11,988 | 0 ticks (`0.000 s`) | `0.0000%` | `11988  0.0` |
+| 1,000 | 14,084 | 14,091.7 (`13.76 MiB`) | 14,096 | 1 tick (`0.010 s`) | `0.0333%` | `14096  0.0` |
 
 ### Tier 2 (`inotify` only, `Environment B` WSL2) [RAN]
 
@@ -108,6 +108,21 @@ delta (Tier 1 in `Environment A`) or webhook receipts (Tier 2 in `Environment B`
 | `grep -rn API_TOKEN <sibling-dir>` | 0 | No false positive |
 | Editor-style `lstat`/`stat` loop (`50x`, `10 ms` interval) | 0 | No false positive |
 | Positive control: `cat <decoy>` (`.env`) | 2 (`pending` + `sent`) | Expected trigger (2 lines recorded in `triggers.jsonl`: `pending` + `sent`) |
+
+### Tier 1 Legitimate Tools Reading Default Config Paths (`Environment A` CI Runner) [RAN]
+
+Setup: Isolated `HOME` containing default-path decoys (`~/.npmrc`, `~/.pypirc`,
+`~/.docker/config.json`, `~/.git-credentials`, `~/.netrc`), plus `~/.gitconfig`
+configured with `credential.helper = store`. Decoyd v1.0 has no allowlist, so any
+tool that opens its own default config file during invocation triggers VFS detection:
+
+| Operation | `rc` | `triggers.jsonl` lines delta | Triggered decoy | Outcome |
+|-----------|-----:|-----------------------------:|-----------------|---------|
+| `npm config ls` | 0 | 2 (`pending` + `sent`) | `~/.npmrc` (`j5-home-npmrc`) | Triggers (known false positive — reads `~/.npmrc`) |
+| `npm ls` (in project dir) | 0 | 2 (`pending` + `sent`) | `~/.npmrc` (`j5-home-npmrc`) | Triggers (known false positive — reads `~/.npmrc`) |
+| `pip list` | 0 | 0 | — | Does not trigger (does not open `~/.pypirc` or `~/.netrc`) |
+| `git credential fill` (`github.com`) | 0 | 2 (`pending` + `sent`) | `~/.git-credentials` (`j5-home-gitcred`) | Triggers (known false positive — reads `~/.git-credentials`) |
+| `docker --version` | 0 | 2 (`pending` + `sent`) | `~/.docker/config.json` (`j5-home-docker`) | Triggers (known false positive — reads `~/.docker/config.json`) |
 
 ### Tier 2 (`inotify`, `2s` Debounce, `Environment B` WSL2) [RAN]
 
