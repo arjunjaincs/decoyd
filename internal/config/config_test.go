@@ -42,6 +42,10 @@ func TestDataDir_Linux(t *testing.T) {
 // TestDataDir_PathContainsAppName verifies that regardless of OS the returned
 // path contains the expected app name segment.
 func TestDataDir_PathContainsAppName(t *testing.T) {
+	// Isolate from the real user home directory so the test is hermetic.
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("APPDATA", t.TempDir())
+
 	dir, err := DataDir()
 	if err != nil {
 		t.Fatalf("DataDir() error: %v", err)

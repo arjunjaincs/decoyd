@@ -44,6 +44,7 @@ func DefaultWatcherConfig() WatcherConfig {
 type rateEntry struct {
 	count     int
 	windowEnd time.Time
+	alertSent bool // true once a suppression alert has been sent for this window
 }
 
 // debounceEntry tracks per-path debounce state within a single watcher session.
@@ -53,8 +54,6 @@ type debounceEntry struct {
 	event  string    // "access", "write", "rename", "delete"
 	expiry time.Time // dispatch alert at or after this time
 }
-
-
 
 // inQuietHours reports whether the watcher should suppress alerts at now.
 func (c WatcherConfig) inQuietHours(now time.Time) bool {

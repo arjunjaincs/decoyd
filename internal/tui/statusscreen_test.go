@@ -209,4 +209,3 @@ func TestStatusModel_WatcherStateStale(t *testing.T) {
 		t.Errorf("expected 'stale lock' in view; got:\n%s", view)
 	}
 }
-

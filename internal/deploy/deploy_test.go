@@ -334,3 +334,201 @@ func TestDeployToFile_EmptyDir_Error(t *testing.T) {
 		t.Error("DeployToFile with empty targetDir should return error")
 	}
 }
+
+// ── A6: deploy hardening tests ───────────────────────────────────────────────
+
+// TestDeploy_SecretDirPerm verifies that secret token types create directories
+// with 0o700 (not 0o750 or wider).
+func TestDeploy_SecretDirPerm(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory permission bits not enforced on Windows")
+	}
+	secretTypes := []string{
+		tokens.TypeAWSCredentials,
+		tokens.TypeSSHKey,
+		tokens.TypeGitHubPAT,
+		tokens.TypeSlackToken,
+		tokens.TypeEnvSecrets,
+	}
+	for _, tt := range secretTypes {
+		tt := tt
+		t.Run(tt, func(t *testing.T) {
+			base := t.TempDir()
+			subDir := filepath.Join(base, "secret")
+			var tok tokens.Token
+			if tt == tokens.TypeSSHKey {
+				tok = tokens.Token{
+					ID:       "deadbeefdeadbeef",
+					Type:     tt,
+					Value:    "-----BEGIN OPENSSH PRIVATE KEY-----\ntest\n-----END OPENSSH PRIVATE KEY-----\n---PUBLIC KEY---\nssh-ed25519 AAAAC test\n",
+					Filename: "id_ed25519",
+				}
+			} else {
+				tok = makeTestToken(tt)
+			}
+			_, err := deploy.DeployToFile(tok, subDir, deploy.Options{})
+			if err != nil {
+				t.Fatalf("DeployToFile(%s): %v", tt, err)
+			}
+			fi, err := os.Stat(subDir)
+			if err != nil {
+				t.Fatalf("stat dir: %v", err)
+			}
+			got := fi.Mode().Perm()
+			if got != 0o700 {
+				t.Errorf("dir perm for %s = %04o; want 0700", tt, got)
+			}
+		})
+	}
+}
+
+// TestDeploy_FilePerm verifies that the deployed file has the expected mode.
+func TestDeploy_FilePerm(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file permission bits not enforced on Windows")
+	}
+	dir := t.TempDir()
+	tok := makeTestToken(tokens.TypeAWSCredentials)
+	res, err := deploy.DeployToFile(tok, dir, deploy.Options{})
+	if err != nil {
+		t.Fatalf("DeployToFile: %v", err)
+	}
+	fi, err := os.Stat(res.DeployedTo)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	got := fi.Mode().Perm()
+	if got != 0o600 {
+		t.Errorf("file perm = %04o; want 0600", got)
+	}
+}
+
+// TestDeploy_SymlinkRefusal verifies that placing a symlink at the target path
+// causes deploy to fail (O_NOFOLLOW on Linux) rather than following the link.
+func TestDeploy_SymlinkRefusal(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires elevated privileges on Windows")
+	}
+	dir := t.TempDir()
+	tok := makeTestToken(tokens.TypeAWSCredentials)
+
+	// Pre-place a symlink at the destination path.
+	dest := filepath.Join(dir, tok.Filename)
+	target := filepath.Join(dir, "real_file")
+	if err := os.WriteFile(target, []byte("real"), 0o600); err != nil {
+		t.Fatalf("write real_file: %v", err)
+	}
+	if err := os.Symlink(target, dest); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	_, err := deploy.DeployToFile(tok, dir, deploy.Options{})
+	if err == nil {
+		t.Error("DeployToFile succeeded when symlink at dest; want error (symlink refused)")
+	} else {
+		t.Logf("correctly refused symlink: %v", err)
+	}
+
+	// Verify real_file was NOT overwritten.
+	data, _ := os.ReadFile(target)
+	if string(data) != "real" {
+		t.Error("real_file was overwritten via symlink — O_NOFOLLOW not effective")
+	}
+}
+
+func TestPresetDirs_IncludesStandardLocations(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	if err := os.Mkdir(filepath.Join(home, ".ssh"), 0o700); err != nil {
+		t.Fatalf("mkdir .ssh: %v", err)
+	}
+
+	presets, err := deploy.PresetDirs()
+	if err != nil {
+		t.Fatalf("PresetDirs(): %v", err)
+	}
+	if len(presets) != 4 {
+		t.Fatalf("expected 4 preset dirs with .ssh present, got %d: %+v", len(presets), presets)
+	}
+	for _, p := range presets {
+		if p.Label == "" || !filepath.IsAbs(p.Path) {
+			t.Errorf("invalid preset dir %+v", p)
+		}
+	}
+}
+
+func TestSanitizePath_TildeHomeAndSubdir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	gotHome, err := deploy.SanitizePath("~")
+	if err != nil {
+		t.Fatalf("SanitizePath(~): %v", err)
+	}
+	if gotHome != home {
+		t.Errorf("SanitizePath(~) = %q; want %q", gotHome, home)
+	}
+
+	gotSub, err := deploy.SanitizePath("~/sub/cred")
+	if err != nil {
+		t.Fatalf("SanitizePath(~/sub/cred): %v", err)
+	}
+	wantSub := filepath.Join(home, "sub", "cred")
+	if gotSub != wantSub {
+		t.Errorf("SanitizePath(~/sub/cred) = %q; want %q", gotSub, wantSub)
+	}
+}
+
+func TestDeployToFile_SecretDirPermAndSSHValidation(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), ".kube")
+	tok := tokens.Token{
+		ID:        "kubetok1",
+		Type:      tokens.TypeKubeconfig,
+		Value:     "apiVersion: v1\n",
+		Filename:  "config",
+		CreatedAt: time.Now().UTC(),
+	}
+	res, err := deploy.DeployToFile(tok, dir, deploy.Options{})
+	if err != nil {
+		t.Fatalf("DeployToFile(kube): %v", err)
+	}
+	if runtime.GOOS != "windows" {
+		fi, err := os.Stat(dir)
+		if err != nil {
+			t.Fatalf("stat kube dir: %v", err)
+		}
+		if fi.Mode().Perm() != 0o700 {
+			t.Errorf("kube dir perm = %04o; want 0700", fi.Mode().Perm())
+		}
+	}
+	if _, err := os.Stat(res.DeployedTo); err != nil {
+		t.Fatalf("expected deployed kubeconfig at %s: %v", res.DeployedTo, err)
+	}
+
+	badSSH := tokens.Token{
+		ID:       "badssh",
+		Type:     tokens.TypeSSHKey,
+		Value:    "not-a-valid-ssh-pair-without-sentinel",
+		Filename: "id_ed25519",
+	}
+	if _, err := deploy.DeployToFile(badSSH, t.TempDir(), deploy.Options{}); err == nil {
+		t.Error("expected error for malformed SSH token without sentinel")
+	}
+
+	goodSSH := tokens.Token{
+		ID:       "goodssh",
+		Type:     tokens.TypeSSHKey,
+		Value:    "PRIVKEY\n---PUBLIC KEY---\nssh-ed25519 AAAA\n",
+		Filename: "id_ed25519",
+	}
+	sshDir := t.TempDir()
+	dryRes, err := deploy.DeployToFile(goodSSH, sshDir, deploy.Options{DryRun: true})
+	if err != nil {
+		t.Fatalf("SSH DryRun failed: %v", err)
+	}
+	if !dryRes.DryRun || !dryRes.WouldCreate || len(dryRes.ExtraFiles) != 1 {
+		t.Errorf("unexpected SSH DryRun result: %+v", dryRes)
+	}
+}

@@ -18,7 +18,7 @@ func openTestStore(t *testing.T) *store.Store {
 	if err != nil {
 		t.Fatalf("store.Open() error: %v", err)
 	}
-	t.Cleanup(func() { st.Close() })
+	t.Cleanup(func() { _ = st.Close() })
 	return st
 }
 
@@ -199,12 +199,16 @@ func TestStore_ListByType(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		tok := makeToken(t)
 		tok.Type = tokens.TypeGitHubPAT
-		st.SaveToken(tok)
+		if err := st.SaveToken(tok); err != nil {
+			t.Fatalf("SaveToken(PAT #%d): %v", i, err)
+		}
 	}
 	for i := 0; i < 2; i++ {
 		tok := makeToken(t)
 		tok.Type = tokens.TypeSSHKey
-		st.SaveToken(tok)
+		if err := st.SaveToken(tok); err != nil {
+			t.Fatalf("SaveToken(SSH #%d): %v", i, err)
+		}
 	}
 
 	pats, err := st.ListByType(tokens.TypeGitHubPAT)
@@ -274,7 +278,7 @@ func TestOpen_LockConflict(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first Open() error: %v", err)
 	}
-	defer first.Close()
+	defer func() { _ = first.Close() }()
 
 	// Second open must time-out and return the friendly message.
 	_, err = store.Open(dbPath)
@@ -301,7 +305,7 @@ func TestOpen_Timeout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first Open() error: %v", err)
 	}
-	defer first.Close()
+	defer func() { _ = first.Close() }()
 
 	start := time.Now()
 	_, err = store.Open(dbPath)

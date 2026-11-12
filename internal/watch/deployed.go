@@ -1,4 +1,4 @@
-﻿// deployed.go — snapshot of tokens that have been deployed to disk.
+// deployed.go — snapshot of tokens that have been deployed to disk.
 //
 // deployed_tokens.json is the cross-process coordination file between the TUI
 // and the headless watcher.  The TUI writes it on every deploy/delete/startup;
@@ -30,16 +30,23 @@ type DeployedToken struct {
 	Type           string `json:"type"`
 	DeployedPath   string `json:"deployed_path"`
 	AlertChannelID string `json:"alert_channel_id,omitempty"`
+	// OwnerUID records the file owner UID expected at daemon read time (O5).
+	OwnerUID *uint32 `json:"owner_uid,omitempty"`
 }
 
 // WriteDeployedSnapshot atomically writes the list of deployed tokens to
 // dataDir/deployed_tokens.json (0600, tmp-then-rename).
 // Only tokens with a non-empty DeployedPath are included.
 func WriteDeployedSnapshot(dataDir string, tokens []DeployedToken) error {
-	// Filter to deployed-only.
-	deployed := tokens[:0]
+	// Filter to deployed-only and stamp OwnerUID when missing (O5).
+	defaultUID := currentOwnerUID()
+	deployed := make([]DeployedToken, 0, len(tokens))
 	for _, t := range tokens {
 		if t.DeployedPath != "" {
+			if t.OwnerUID == nil && defaultUID != nil {
+				uidCopy := *defaultUID
+				t.OwnerUID = &uidCopy
+			}
 			deployed = append(deployed, t)
 		}
 	}

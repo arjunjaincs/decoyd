@@ -1,173 +1,137 @@
-# Decoyd
+# Decoyd — Credential Decoy File Monitor
 
-> Drop fake credentials where an attacker would look. Get alerted the moment anything touches them.
+**Deploy decoy credential files. Get alerted when anything accesses them.**
 
-Decoyd is a self-hosted canary token tool. It generates realistic-looking decoy credentials — fake AWS keys, SSH private keys, `.env` files, and more — and watches them for access. When a file is opened, renamed, or deleted, you receive an alert over whichever channel you configure (Discord, Slack, Telegram, Teams, ntfy.sh, or a generic webhook).
-
-No cloud account. No ongoing cost. One static binary.
-
----
-
-## Token types
-
-| Type | What it produces |
-|---|---|
-| AWS credentials | `AKIA…` access key + secret in real credentials file format |
-| SSH private key | Valid ed25519 keypair (OpenSSH PEM + `.pub` sibling), never registered anywhere |
-| `.env` secrets | `DATABASE_URL`, `STRIPE_SECRET_KEY`, `JWT_SECRET` with realistic fake values |
-| GitHub PAT | `ghp_` + 36 alphanumeric chars — matches GitHub's real token format |
-| Slack bot token | `xoxb-` with realistic digit segment structure |
-| Kubeconfig | Structurally valid YAML with fake cluster endpoint and bearer token |
-| Database dump | `backup.sql` with real-looking schema, connection header, and fake `INSERT` rows |
-| DNS canary token | Unique 16-char subdomain label for a domain you control |
+Decoyd is a Go CLI/TUI and daemon that generates realistic decoy credential
+files (`.npmrc`, `id_rsa`, `.git-credentials`, AWS credentials, etc.) and fires an
+alert with process attribution (Tier 1 on Linux) or token identity (Tier 2)
+when a monitored file is accessed.
 
 ---
 
-## Quick start
+## Quickstart
 
-```sh
-# Requires Go 1.25+
-go build -o decoyd ./cmd/decoyd
+```bash
+# Install
+go install github.com/arjunjaincs/decoyd/cmd/decoyd@latest
 
-# Linux
-./decoyd
+# Launch the interactive TUI to generate tokens, configure alert sinks, and deploy files
+decoyd
 
-# Windows
-.\decoyd.exe
+# Or run the headless watcher against an existing data dir (~/.decoyd by default)
+decoyd watch &              # Tier 2 (inotify/fsnotify, no root required)
+sudo decoyd watch --tier1   # Tier 1 (fanotify, Linux, full process attribution; errors if unavailable)
+
+# Check for detected accesses
+decoyd events
+decoyd events --fail-if-any   # exit 3 if anything was caught (use in CI)
 ```
 
-The first launch opens a brief animated splash → press any key → main menu.
-Every screen is centered in your terminal. The TUI starts the file watcher automatically — no separate background process needed for basic use.
+---
+
+## Detection Tiers
+
+| Feature | Tier 1 (Linux, root / `CAP_SYS_ADMIN`) | Tier 2 (unprivileged) |
+|---------|----------------------------------------|-----------------------|
+| Transport | hybrid `fanotify` (`FAN_CLASS_NOTIF`) + `inotify` | Linux `inotify` / Windows `fsnotify` (`ReadDirectoryChangesW`) |
+| Process pid + exe + cmdline | ✅ | ❌ |
+| npm lifecycle hook attribution | ✅ (`npm_package`, `npm_version`, `npm_lifecycle_event` via `/proc/<pid>/environ`) | ❌ |
+| Root required | Yes | No |
+| Windows read-only open detection | N/A | ❌ (write/rename/delete only on Windows) |
+
+> **Package-manager attribution scope:** Tier 1 package attribution reads only npm lifecycle environment variables (`npm_package_name`, `npm_package_version`, `npm_lifecycle_event`) from `/proc/<pid>/environ`. `pnpm` and `yarn` are untested, and `pip` is not supported.
+>
+> **Detection latency (event recorded in `triggers.jsonl`):** In [CI benchmarks](docs/BENCHMARKS.md), time from a child process reading a decoy file to the event recorded in `triggers.jsonl` over 100 runs was `7.677 ms` p50 (`8.526`–`8.577 ms` p95) for Tier 1 `fanotify` and `2003.355 ms` p50 (`2004.653`–`2004.684 ms` p95) for Tier 2 `inotify` (2 s per-path debounce).
 
 ---
 
-## Workflow
+## Token Types (18)
 
-### 1. Generate a decoy
+| Filename | Type Key | Format |
+|----------|----------|--------|
+| `credentials` | `aws_credentials` | AWS `AKIA...` base32 access key + secret |
+| `id_ed25519` | `ssh_key` | Valid Ed25519 SSH keypair (no comment identifier) |
+| `.env` | `env_secrets` | `.env` with `DATABASE_URL`, `STRIPE_SECRET_KEY`, `JWT_SECRET` |
+| `.github_token` | `github_pat` | GitHub PAT (`ghp_...`) |
+| `.slack_token` | `slack_token` | Slack bot token (`xoxb-...`) |
+| `config` | `kubeconfig` | Kubeconfig YAML with random cluster/user + bearer token |
+| `backup.sql` | `db_dump` | SQL dump header, schema, fake rows |
+| `token.txt` | `dns_canary` | Unique subdomain label (experimental: no listener, needs external DNS logs) |
+| `.npmrc` | `npmrc` | npm access token (`npm_...`; plausible, not verified against official specs) |
+| `.pypirc` | `pypirc` | PyPI API token (`pypi-...`; plausible, not verified against official specs) |
+| `config.json` | `docker_config` | Docker registry base64 auth JSON |
+| `.git-credentials` | `git_credentials` | Git credential store URL with `ghp_...` PAT |
+| `.netrc` | `netrc` | `.netrc` host/login/password |
+| `id_rsa` | `rsa_key` | RSA-2048 private key in PKCS#1 PEM |
+| `service-account.json` | `gcp_service_account` | GCP service account JSON with PKCS#8 private key |
+| `credentials.tfrc.json` | `terraform_creds` | Terraform Cloud API token JSON |
+| `.vault-token` | `vault_token` | HashiCorp Vault token (`s.<24 chars>`) |
+| `mcp.json` | `mcp_config` | MCP server config JSON with `ghp_...` PAT |
 
-1. Select **1. Generate a decoy** from the main menu
-2. `↑`/`↓` or `j`/`k` to navigate, `Space` to toggle token types
-3. Optionally navigate to the **Label** field and type a note
-4. `Enter` to generate — tokens are saved instantly to the local database
-5. Any key to return to the main menu
-
-### 2. Deploy a decoy
-
-1. Select **2. Deploy existing decoys**
-2. Pick a token from your list
-3. Pick a destination: Home, Downloads, Desktop, `~/.ssh`, or a custom path
-4. Press `d` on the confirmation screen for a **dry-run** preview, or `Enter` to write
-
-The deployed path is recorded in the database and shown in the token list.
-
-### 3. Configure alert channels
-
-1. Select **3. Alert settings** from the main menu
-2. Press `Enter` on the **Channel** row to cycle through: Discord webhook, Slack webhook, Telegram bot, Microsoft Teams, ntfy.sh, Generic webhook
-3. `Tab` / `Shift+Tab` to move between fields; type your webhook URL or bot token
-4. Navigate to **Send test alert** and press `Enter` (or press `s` from anywhere on the form)
-5. The config is saved to `alert_config.json` automatically on success
-
-Webhook URLs and bot tokens are masked (`••••last4`) when unfocused so secrets do not linger on screen. A clear error is shown before any network request if the URL is missing or malformed.
-
-**Multiple alert channels:** you can configure more than one channel and assign individual tokens to specific channels. Tokens without an assignment use the default channel.
-
-### 4. Monitor and manage tokens
-
-1. Select **4. Status** from the main menu to see watcher state and recent trigger events
-2. `↑`/`↓` to scroll, `Enter` to drill into an event, `r` to refresh, `Esc` to go back
-
-**5. View tokens** opens the full token management screen:
-
-- `d` — delete a token (one confirm if no deployed file; two-step if a file exists)
-  - Second confirm: `y` — delete record **and** file | `n` — record only | `Esc` — cancel all
-- `e` — edit the Notes label inline
-- `a` — assign a specific alert channel to this token
-- `Esc` — back to menu
-
-For a full token list with IDs from the CLI: `decoyd list`.
+**Rule**: Generated tokens contain **no static identifiers** — tracing a leaked
+credential means looking up its value in the database, never embedding visible labels.
 
 ---
 
-## CLI reference
+## Detection Content
 
-```sh
-decoyd                        # launch the interactive TUI
-decoyd list                   # tab-aligned table of all token records
-decoyd remove <id>            # delete a token record (deployed file is kept)
-decoyd remove --purge <id>    # delete the record AND the deployed file from disk
-decoyd triggers               # recent trigger events, newest-first
-decoyd watch                  # run the headless watcher (no TUI — useful for servers)
-decoyd install                # register watcher as an OS service (see below)
-decoyd help                   # print usage
+- `detection/decoyd-wazuh.xml` — Wazuh decoder + rules (**syntax-checked, untested** against a real Wazuh 4.x installation)
+- `detection/decoyd.yml` — Sigma rules (**syntax-checked, untested** against live `sigma-cli` / SIEM)
+- `docs/ATTACK-MAPPING.md` — ATT&CK T1552.001 and related mapping
+
+---
+
+## System Install (Linux, persistent)
+
+```bash
+# Install systemd unit decoyd.service (writes only /usr/local/bin/decoyd, unit, /var/lib/decoyd, /etc/decoyd)
+sudo decoyd install --system --data-dir /var/lib/decoyd
+
+# Sync alert config from user dir to /etc/decoyd/alert_config.json (and deployed_tokens.json to /var/lib/decoyd/)
+sudo decoyd sync
+
+# Uninstall service, binary, /var/lib/decoyd, and /etc/decoyd
+sudo decoyd uninstall --system
 ```
 
-`decoyd remove` without `--purge` leaves the deployed file on disk — this is intentional. A management command shouldn't silently delete files you placed carefully. Use `--purge` when you want a full cleanup.
+---
 
-### Persistent background monitoring
+## CI Integration
 
-`decoyd install` registers `decoyd watch` to run automatically at login:
+```yaml
+- run: decoyd events --fail-if-any
+  # Exits 3 if any TriggerEvent was recorded; fails the CI job
+```
 
-- **Linux:** creates a `systemd --user` unit (`decoyd-watch.service`)
-- **Windows:** registers a Task Scheduler task (`DecoydWatch`) using the raw Task Scheduler COM API — no administrator rights needed
-
-After registration the watcher starts at next logon. The TUI's embedded watcher remains active while the TUI is open regardless of whether `install` has been run.
+See `examples/github-action/decoyd-demo.yml` for a full demo workflow.
 
 ---
 
-## Keybindings (global)
+## Architecture
 
-| Key | Action |
-|---|---|
-| `↑` / `k`, `↓` / `j` | Navigate |
-| `Space` | Toggle selection |
-| `Enter` | Confirm / cycle |
-| `Esc` | Back |
-| `?` | Help overlay |
-| `q` / `Ctrl+C` | Quit |
-
-**Paste in text fields:** paste works via your terminal's native paste gesture (Ctrl+Shift+V on most Linux terminals, right-click in many Windows terminals). On Windows legacy terminals (PowerShell 5.1, cmd.exe) Ctrl+V also reads directly from the clipboard.
-
-**Ctrl+C in text fields (Windows only):** when a text field is focused and non-empty, Ctrl+C copies the field content to the Windows clipboard instead of quitting. On Linux/macOS this shortcut quits normally regardless of focus — use your terminal's text selection to copy field content.
-
----
-
-## Data directory
-
-| Platform | Path |
-|---|---|
-| Linux | `~/.decoyd/` |
-| Windows | `%APPDATA%\Decoyd\` |
-
-| File | Contents |
-|---|---|
-| `decoyd.db` | bbolt database — every token you've generated and deployed |
-| `alert_config.json` | Alert channel credentials (webhook URLs, bot tokens) — **0600** |
-| `deployed_tokens.json` | Snapshot of deployed token paths — read by the headless watcher |
-| `triggers.jsonl` | Append-only log of every trigger event and alert status |
-| `watcher.pid` | Lock file holding the watcher's PID while the watcher is running |
+```
+cmd/decoyd/           Main binary (TUI, list, remove, watch, install, uninstall, sync, events, triggers, test, doctor)
+cmd/decoyd-emu/       Benign test emulator (read-only credential scanner)
+internal/watch/       Watchers (fanotify_linux.go, hybrid_linux.go, watch_linux.go, watch_windows.go, procinfo_linux.go)
+internal/attribution/ Process + attribution types
+internal/tokens/      Token generators (18 types, no static identifiers)
+internal/alert/       Alerters (Discord, Slack, Telegram, Teams, ntfy, webhook)
+internal/triglog/     triggers.jsonl (schema v1)
+detection/            Wazuh + Sigma detection content (syntax-checked, untested)
+docs/                 ADR, EVENT-SCHEMA, ATTACK-MAPPING, BENCHMARKS, THREAT-MODEL, blog
+```
 
 ---
 
-## Security notes
+## Development notes
 
-**Protect your data directory.** `decoyd.db` and `alert_config.json` are written at `0600` (Linux); the `~/.decoyd/` directory is `0700`. These files contain the map of every trap you've planted and your alert channel credentials. Do not back them up to a shared location or commit them to version control.
+Decoyd was built with AI coding agents under human review. The verifiable evidence for
+build, security scanning, cross-platform tests, `systemd` lifecycle behavior, npm Tier 1
+attribution, and benchmarks is the automated GitHub Actions CI history:
 
-**Alert credentials are masked in the TUI.** Webhook URLs and bot tokens are displayed as `••••last4` when unfocused and never appear in error messages or log output.
-
-**GitHub / GitLab secret scanning.** The AWS, GitHub PAT, and Slack token formats generated by Decoyd match the real formats closely enough that GitHub's secret-scanning pipeline may flag them if they end up in a git commit. This is intentional — the decoys are meant to look real — but worth knowing.
-
-**Windows file-access detection.** On Windows, only Write, Rename, and Remove events trigger alerts. Read-only access (`cat`, opening in Notepad) is not detected due to a Windows kernel limitation with directory-change notifications. This is a v1 constraint.
-
----
-
-## Requirements
-
-- Go 1.25+ (to build from source)
-- Windows or Linux (amd64)
-- `powershell.exe` on PATH (Windows only, for `decoyd install` — present on all stock Windows installations)
-
-[![CI](https://github.com/arjunjaincs/decoyd/actions/workflows/ci.yml/badge.svg)](https://github.com/arjunjaincs/decoyd/actions/workflows/ci.yml)
+- [`CI` (Linux & Windows matrix, govulncheck, gosec, staticcheck, vet)](https://github.com/arjunjaincs/decoyd/actions/workflows/ci.yml) — run [`43162675839`](https://github.com/arjunjaincs/decoyd/actions/runs/43162675839)
+- [`CI — Privileged and Windows` (`fanotify`, `npm-e2e`, `system-lifecycle`, `benchmarks`)](https://github.com/arjunjaincs/decoyd/actions/workflows/ci-privileged.yml) — runs [`43161750870`](https://github.com/arjunjaincs/decoyd/actions/runs/43161750870), [`43162675883`](https://github.com/arjunjaincs/decoyd/actions/runs/43162675883)
+- [`Decoyd Demo (Tier 1 npm Credential Access)`](https://github.com/arjunjaincs/decoyd/actions/workflows/demo.yml) — run [`43162675881`](https://github.com/arjunjaincs/decoyd/actions/runs/43162675881)
 
 ---
 

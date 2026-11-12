@@ -10,7 +10,6 @@ import (
 	"github.com/arjunjaincs/decoyd/internal/watch"
 )
 
-
 // ----------------------------------------------------------------------------
 // Screen enum
 // ----------------------------------------------------------------------------
@@ -274,11 +273,19 @@ func (m RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// ── Deploy screen done ───────────────────────────────────────────────────
 	case DeployScreenDoneMsg:
+		// Reload the watcher so newly deployed (or removed) tokens are watched.
+		if m.watcher != nil {
+			_ = m.watcher.Reload()
+		}
 		m.current = ScreenMainMenu
 		return m, m.mainMenu.Init()
 
 	// ── Token list done ──────────────────────────────────────────────────────
 	case TokenListDoneMsg:
+		// Reload the watcher so purged tokens are removed from the watch set.
+		if m.watcher != nil {
+			_ = m.watcher.Reload()
+		}
 		m.current = ScreenMainMenu
 		return m, m.mainMenu.Init()
 

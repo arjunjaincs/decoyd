@@ -96,7 +96,6 @@ type AlertModel struct {
 	spinFrame int
 }
 
-
 // spinnerFrames is the spinner used while the test send is in flight.
 // Braille frames are used when the terminal supports Unicode; ASCII rotation otherwise.
 var spinnerFrames = func() []string {
@@ -702,7 +701,7 @@ func (m AlertModel) viewForm() string {
 	// ── Send button ───────────────────────────────────────────────────────
 	sendLabel := "[ Send test alert ]"
 	if m.fieldCursor == alertFieldSend {
-		sb.WriteString(SelectedItemStyle().Render(G.Cursor+" "+sendLabel))
+		sb.WriteString(SelectedItemStyle().Render(G.Cursor + " " + sendLabel))
 	} else {
 		sb.WriteString(NormalItemStyle.Render("  " + sendLabel))
 	}
@@ -734,7 +733,7 @@ func (m AlertModel) renderField(fieldIdx int, label, value string, isSecret, _ b
 	if focused {
 		prefix = G.Cursor + " "
 	}
-	labelStr := MutedStyle.Render(label+":")
+	labelStr := MutedStyle.Render(label + ":")
 	var valueStr string
 	if focused {
 		valueStr = SelectedItemStyle().Render(value)
@@ -938,7 +937,7 @@ func (m AlertModel) viewList() string {
 	}
 
 	content := strings.TrimRight(sb.String(), "\n")
-	help := HelpTextStyle.Render(G.NavUp+"/"+G.NavDown+" browse   enter edit   a add   d delete   s set default   esc back   "+G.Star+" = default")
+	help := HelpTextStyle.Render(G.NavUp + "/" + G.NavDown + " browse   enter edit   a add   d delete   s set default   esc back   " + G.Star + " = default")
 	boxW := ScreenBoxWidth(m.width, 78)
 	return lipgloss.JoinVertical(lipgloss.Left,
 		renderBoxInner("Alert Channels", content, boxW, ColorBorder),
@@ -974,4 +973,3 @@ func (m AlertModel) viewConfirmDeleteChannel() string {
 		help,
 	)
 }
-

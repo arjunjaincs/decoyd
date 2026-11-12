@@ -1,0 +1,71 @@
+<!-- Status: syntax-checked (Python xml.etree.ElementTree), untested (not tested against a real Wazuh 4.x installation).
+     Validate with xmllint on detection/decoyd-wazuh.xml or Wazuh wazuh-analysisd/wazuh-logtest -->
+<!-- Wazuh decoder and rules for Decoyd triggers.jsonl schema v1 -->
+<ossec_config>
+
+  <!-- =====================================================================
+       DECODER: parse Decoyd trigger events from triggers.jsonl
+       Each line is one TriggerEvent JSON object (internal/triglog/triglog.go).
+       ===================================================================== -->
+  <decoder name="decoyd">
+    <prematch>"token_id":</prematch>
+  </decoder>
+
+  <decoder name="decoyd-fields">
+    <parent>decoyd</parent>
+    <plugin_decoder>JSON_Decoder</plugin_decoder>
+  </decoder>
+
+  <!-- Field mappings (matching TriggerEvent JSON in docs/EVENT-SCHEMA.md):
+       id, token_id, token_type, path, triggered_at, event_type, status
+       watcher_tier ("tier1" or "tier2")
+       attribution.accessor.pid, .comm, .exe, .cmdline, .uid
+       attribution.confidence (1=low, 2=medium, 3=high)
+       attribution.npm_package, .npm_version, .npm_lifecycle_event
+  -->
+
+  <!-- =====================================================================
+       RULES
+       ===================================================================== -->
+
+  <!-- Parent rule: any Decoyd event -->
+  <rule id="100100" level="10">
+    <decoded_as>decoyd</decoded_as>
+    <description>Decoyd: credential decoy file accessed ($(token_type) at $(path))</description>
+    <group>decoyd,credential_access,T1552.001</group>
+  </rule>
+
+  <!-- Tier 1 event (fanotify with process attribution) -->
+  <rule id="100101" level="12" frequency="1" timeframe="1">
+    <if_sid>100100</if_sid>
+    <field name="watcher_tier">^tier1$</field>
+    <description>Decoyd Tier 1: decoy accessed with process attribution (pid=$(attribution.accessor.pid) exe=$(attribution.accessor.exe))</description>
+    <group>decoyd,tier1,credential_access,T1552.001</group>
+  </rule>
+
+  <!-- npm lifecycle hook attribution -->
+  <rule id="100102" level="13">
+    <if_sid>100101</if_sid>
+    <field name="attribution.npm_package">.+</field>
+    <field name="attribution.npm_lifecycle_event">^(preinstall|install|postinstall|prepare)$</field>
+    <description>Decoyd: npm lifecycle $(attribution.npm_lifecycle_event) script accessed decoy (package=$(attribution.npm_package)@$(attribution.npm_version))</description>
+    <group>decoyd,supply_chain,T1195.002</group>
+  </rule>
+
+  <!-- Multiple tokens accessed by the same PID within 60s (potential sweep) -->
+  <rule id="100103" level="14" frequency="3" timeframe="60">
+    <if_sid>100100</if_sid>
+    <same_field>attribution.accessor.pid</same_field>
+    <description>Decoyd: same process accessed 3+ decoy tokens within 60s</description>
+    <group>decoyd,sweep,credential_access,T1552.001</group>
+  </rule>
+
+  <!-- Tier 2 fallback event (inotify / fsnotify, no process attribution) -->
+  <rule id="100104" level="10">
+    <if_sid>100100</if_sid>
+    <field name="watcher_tier">^tier2$</field>
+    <description>Decoyd Tier 2: decoy accessed (no process attribution)</description>
+    <group>decoyd,tier2,credential_access,T1552.001</group>
+  </rule>
+
+</ossec_config>

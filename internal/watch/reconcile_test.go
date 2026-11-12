@@ -33,7 +33,7 @@ func TestReconcileSnapshot_WritesDeployedTokens(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 
 	// Add one deployed token and one undeployed token.
 	deployed := tokens.Token{
@@ -81,7 +81,7 @@ func TestReconcileSnapshot_IsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 
 	tok := tokens.Token{
 		ID:           "aabbccdd00000003",
@@ -117,7 +117,7 @@ func TestReconcileSnapshot_OverwritesStaleEntries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 
 	tok1 := tokens.Token{ID: "aaaa000000000001", Type: tokens.TypeAWSCredentials, DeployedPath: "/tmp/creds"}
 	tok2 := tokens.Token{ID: "aaaa000000000002", Type: tokens.TypeEnvSecrets, DeployedPath: "/tmp/.env"}

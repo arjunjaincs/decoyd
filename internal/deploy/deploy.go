@@ -9,10 +9,12 @@ package deploy
 import (
 	"errors"
 	"fmt"
+	"io"
+	"math/rand"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
+	"time"
 
 	"github.com/arjunjaincs/decoyd/internal/tokens"
 )
@@ -40,13 +42,31 @@ func PermForType(tokenType string) os.FileMode {
 	}
 }
 
+// dirPermForType returns the directory permission for a token type.
+// Secret token types (keys, credentials) get 0o700 to restrict directory
+// listing to the owner. All other types get 0o750.
+func dirPermForType(tokenType string) os.FileMode {
+	switch tokenType {
+	case tokens.TypeAWSCredentials,
+		tokens.TypeSSHKey,
+		tokens.TypeGitHubPAT,
+		tokens.TypeSlackToken,
+		tokens.TypeEnvSecrets,
+		tokens.TypeDBDump,
+		tokens.TypeKubeconfig:
+		return 0o700
+	default:
+		return 0o750
+	}
+}
+
 // DeployResult carries the outcome of a single deploy operation.
 type DeployResult struct {
-	Token        tokens.Token
-	DeployedTo   string // absolute path of the primary written file
-	ExtraFiles   []string // additional files written (e.g. id_ed25519.pub)
-	DryRun       bool   // true ⇒ nothing was written, result is a preview
-	WouldCreate  bool   // only meaningful when DryRun == true
+	Token       tokens.Token
+	DeployedTo  string   // absolute path of the primary written file
+	ExtraFiles  []string // additional files written (e.g. id_ed25519.pub)
+	DryRun      bool     // true ⇒ nothing was written, result is a preview
+	WouldCreate bool     // only meaningful when DryRun == true
 }
 
 // Options controls how DeployToFile behaves.
@@ -74,6 +94,13 @@ func DeployToFile(t tokens.Token, targetDir string, opts Options) (DeployResult,
 		return deploySSHKeyPair(t, targetDir, opts)
 	}
 
+	// Warn when running as root and deploying outside system-managed directories.
+	// Deploying outside /var/lib/decoyd or /etc/decoyd as root risks clobbering
+	// system files if the caller passes a user-writable path. This is a warning,
+	// not an error — the caller may be intentionally writing to a custom path
+	// (e.g., /opt, CI runner home).
+	warnIfRootOutsideSystemDirs(targetDir)
+
 	// Resolve the absolute target path.
 	absDir, err := filepath.Abs(targetDir)
 	if err != nil {
@@ -100,7 +127,7 @@ func DeployToFile(t tokens.Token, targetDir string, opts Options) (DeployResult,
 	}
 
 	// Ensure the directory exists.
-	if err := os.MkdirAll(absDir, 0o750); err != nil {
+	if err := os.MkdirAll(absDir, dirPermForType(t.Type)); err != nil {
 		return DeployResult{}, fmt.Errorf("deploy: create directory: %w", err)
 	}
 
@@ -108,6 +135,7 @@ func DeployToFile(t tokens.Token, targetDir string, opts Options) (DeployResult,
 	if err := writeFile(dest, t.Value, perm); err != nil {
 		return DeployResult{}, err
 	}
+	backdateFiles(dest)
 
 	return res, nil
 }
@@ -140,9 +168,9 @@ func deploySSHKeyPair(t tokens.Token, targetDir string, opts Options) (DeployRes
 	}
 
 	res := DeployResult{
-		Token:       t,
-		DeployedTo:  privDest,
-		ExtraFiles:  []string{pubDest},
+		Token:      t,
+		DeployedTo: privDest,
+		ExtraFiles: []string{pubDest},
 	}
 
 	if opts.DryRun {
@@ -151,7 +179,7 @@ func deploySSHKeyPair(t tokens.Token, targetDir string, opts Options) (DeployRes
 		return res, nil
 	}
 
-	if err := os.MkdirAll(absDir, 0o750); err != nil {
+	if err := os.MkdirAll(absDir, dirPermForType(t.Type)); err != nil {
 		return DeployResult{}, fmt.Errorf("deploy: create directory: %w", err)
 	}
 
@@ -165,19 +193,59 @@ func deploySSHKeyPair(t tokens.Token, targetDir string, opts Options) (DeployRes
 		_ = os.Remove(privDest)
 		return DeployResult{}, err
 	}
+	backdateFiles(privDest, pubDest)
 
 	return res, nil
 }
 
 // writeFile writes content to dest with the given permissions.
+// Uses openExclNoFollow (O_CREAT|O_EXCL|O_NOFOLLOW on Linux) to prevent
+// symlink attacks and TOCTOU races. Applies permissions via file descriptor
+// (Chmod on the fd) rather than a separate path-based chmod call.
 func writeFile(dest, content string, perm os.FileMode) error {
-	if err := os.WriteFile(dest, []byte(content), perm); err != nil {
+	f, err := openExclNoFollow(dest, perm)
+	if err != nil {
+		return fmt.Errorf("deploy: open %s: %w", dest, err)
+	}
+	closed := false
+	defer func() {
+		if !closed {
+			_ = f.Close()
+		}
+	}()
+
+	if _, err := io.WriteString(f, content); err != nil {
+		// Best-effort: remove the partially-written file to avoid a corrupt decoy.
+		_ = f.Close()
+		closed = true
+		_ = os.Remove(dest)
 		return fmt.Errorf("deploy: write %s: %w", dest, err)
 	}
-	if runtime.GOOS != "windows" {
-		_ = os.Chmod(dest, perm)
+
+	// Apply permissions via fd (avoids a path-based chmod that could race).
+	if err := f.Chmod(perm); err != nil {
+		// Non-fatal on platforms where Chmod via fd is unsupported;
+		// the perm passed to openExclNoFollow already set the umask-adjusted mode.
+		_ = err
+	}
+	closed = true
+	if err := f.Close(); err != nil {
+		_ = os.Remove(dest)
+		return fmt.Errorf("deploy: close %s: %w", dest, err)
 	}
 	return nil
+}
+
+// backdateFiles sets the atime and mtime of each path to a random time
+// 30-400 days before now.  This ensures deployed decoy files do not have a
+// suspicious "just-created" timestamp that might alert a careful attacker.
+// Errors are silently ignored; backdating is best-effort.
+func backdateFiles(paths ...string) {
+	daysBack := 30 + rand.Intn(371) // #nosec G404 -- mtime jitter is not security-sensitive; math/rand is sufficient
+	t := time.Now().AddDate(0, 0, -daysBack)
+	for _, p := range paths {
+		_ = os.Chtimes(p, t, t)
+	}
 }
 
 // PresetDirs returns platform-appropriate preset destination directories.
@@ -219,4 +287,37 @@ func SanitizePath(raw string) (string, error) {
 		return filepath.Join(home, raw[1:]), nil
 	}
 	return filepath.Abs(raw)
+}
+
+var (
+	deployGetUID            = os.Getuid
+	deployWarnOut io.Writer = os.Stderr
+)
+
+// warnIfRootOutsideSystemDirs writes a warning to deployWarnOut when the process
+// runs as UID 0 and targetDir is not under a system-managed decoyd path.
+// System paths: /var/lib/decoyd, /etc/decoyd (Linux convention).
+// This is a warning, not an error. AGENTS.md Rule 12/14.
+func warnIfRootOutsideSystemDirs(targetDir string) {
+	if deployGetUID() != 0 {
+		return
+	}
+	abs, err := filepath.Abs(targetDir)
+	if err != nil {
+		return
+	}
+	systemPaths := []string{"/var/lib/decoyd", "/etc/decoyd"}
+	for _, sp := range systemPaths {
+		spAbs, serr := filepath.Abs(sp)
+		if serr != nil {
+			spAbs = sp
+		}
+		if abs == spAbs || strings.HasPrefix(abs, spAbs+string(filepath.Separator)) {
+			return // within a system path — OK
+		}
+	}
+	fmt.Fprintf(deployWarnOut,
+		"decoyd deploy: warning: running as root; deploying to %q which is outside system-managed directories"+
+			" (/var/lib/decoyd, /etc/decoyd)."+
+			" This risks deploying to a user-writable path.\n", abs)
 }

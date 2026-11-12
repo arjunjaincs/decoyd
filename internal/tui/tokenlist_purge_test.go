@@ -89,8 +89,8 @@ func TestTokenList_ConfirmDelete_WithPath_TransitionsToPurge(t *testing.T) {
 	m := newTokenListWithTokens([]tokens.Token{
 		{ID: "t3", Type: tokens.TypeSSHKey, DeployedPath: "/tmp/id_ed25519"},
 	})
-	m = sendKey(m, "d")  // → confDel
-	m = sendKey(m, "y")  // has path → should go to confPurge, not browse
+	m = sendKey(m, "d") // → confDel
+	m = sendKey(m, "y") // has path → should go to confPurge, not browse
 	if m.state != tokenListStateConfPurge {
 		t.Errorf("'y' with DeployedPath → state %v; want tokenListStateConfPurge", m.state)
 	}
@@ -103,8 +103,8 @@ func TestTokenList_ConfirmDelete_NoPath_DeletesDirectly(t *testing.T) {
 	m := newTokenListWithTokens([]tokens.Token{
 		{ID: "t4", Type: tokens.TypeGitHubPAT, DeployedPath: ""},
 	})
-	m = sendKey(m, "d")  // → confDel
-	m = sendKey(m, "y")  // no path → should go straight to browse
+	m = sendKey(m, "d") // → confDel
+	m = sendKey(m, "y") // no path → should go straight to browse
 	if m.state != tokenListStateBrowse {
 		t.Errorf("'y' without path → state %v; want tokenListStateBrowse", m.state)
 	}
@@ -120,8 +120,8 @@ func TestTokenList_ConfirmPurge_EscCancelsAll(t *testing.T) {
 	m := newTokenListWithTokens([]tokens.Token{
 		{ID: "t5", Type: tokens.TypeSSHKey, DeployedPath: "/tmp/id_ed25519"},
 	})
-	m = sendKey(m, "d")  // confDel
-	m = sendKey(m, "y")  // confPurge (has path)
+	m = sendKey(m, "d") // confDel
+	m = sendKey(m, "y") // confPurge (has path)
 	if m.state != tokenListStateConfPurge {
 		t.Fatalf("precondition: state = %v", m.state)
 	}
@@ -148,9 +148,9 @@ func TestTokenList_ConfirmPurge_NKeepsFile(t *testing.T) {
 	m := newTokenListWithTokens([]tokens.Token{
 		{ID: "t6", Type: tokens.TypeSSHKey, DeployedPath: filePath},
 	})
-	m = sendKey(m, "d")  // confDel
-	m = sendKey(m, "y")  // confPurge
-	m = sendKey(m, "n")  // keep file, delete record only
+	m = sendKey(m, "d") // confDel
+	m = sendKey(m, "y") // confPurge
+	m = sendKey(m, "n") // keep file, delete record only
 
 	if m.state != tokenListStateBrowse {
 		t.Errorf("'n' → state %v; want tokenListStateBrowse", m.state)
@@ -178,9 +178,9 @@ func TestTokenList_ConfirmPurge_YDeletesFile(t *testing.T) {
 	m := newTokenListWithTokens([]tokens.Token{
 		{ID: "t7", Type: tokens.TypeSSHKey, DeployedPath: filePath},
 	})
-	m = sendKey(m, "d")  // confDel
-	m = sendKey(m, "y")  // confPurge
-	m = sendKey(m, "y")  // confirm purge — delete both
+	m = sendKey(m, "d") // confDel
+	m = sendKey(m, "y") // confPurge
+	m = sendKey(m, "y") // confirm purge — delete both
 
 	if m.state != tokenListStateBrowse {
 		t.Errorf("'y' purge → state %v; want tokenListStateBrowse", m.state)

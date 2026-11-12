@@ -116,7 +116,6 @@ func TestWatcherLockGraceDegrade_ErrWatcherRunning(t *testing.T) {
 	}
 }
 
-
 // TestQuitStopsWatcher verifies that a ctrl+c key stops the embedded watcher
 // before returning tea.Quit, so the PID file is cleaned up.
 func TestQuitStopsWatcher(t *testing.T) {

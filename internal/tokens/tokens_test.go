@@ -89,7 +89,7 @@ func TestGenerateAWSCredentials_Format(t *testing.T) {
 	}
 
 	// Access key ID must match AKIA[A-Z0-9]{16}
-	re := regexp.MustCompile(`aws_access_key_id = (AKIA[A-Z0-9]{16})`)
+	re := regexp.MustCompile(`aws_access_key_id = (AKIA[A-Z2-7]{16})`)
 	m := re.FindStringSubmatch(tok.Value)
 	if m == nil {
 		t.Errorf("aws_access_key_id not found or wrong format in:\n%s", tok.Value)
@@ -288,6 +288,126 @@ func TestGenerateDNSCanary_LabelUniqueness(t *testing.T) {
 	}
 }
 
+// ── Fingerprint denylist ─────────────────────────────────────────────────────
+
+// highEntropyRE strips runs of 16+ base64/alphanumeric chars — these are random
+// values that cannot be banned from templates (Rule 12 applies to template text,
+// not to random entropy values).
+var highEntropyRE = regexp.MustCompile(`[A-Za-z0-9+/=]{16,}`)
+
+var denylistExactPhrases = []string{
+	"decoyd",
+	"decoy",
+	"canary",
+	"# Create a DNS",
+	"# Label:",
+	"Decoyd will",
+	"dns_canary",
+}
+
+var denylistWordPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)\bfake\b`),
+	regexp.MustCompile(`(?i)\bexample\b`),
+}
+
+// findStaticIdentifier checks value (after stripping 16+ char high-entropy runs)
+// and filename against Rule 12 banned terms. Returns the matching rule and true
+// if a forbidden identifier was found.
+func findStaticIdentifier(value, filename string) (string, bool) {
+	structural := highEntropyRE.ReplaceAllString(value, "")
+	for _, phrase := range denylistExactPhrases {
+		lo := strings.ToLower(phrase)
+		if strings.Contains(strings.ToLower(structural), lo) {
+			return "value contains " + phrase, true
+		}
+		if strings.Contains(strings.ToLower(filename), lo) {
+			return "filename contains " + phrase, true
+		}
+	}
+	for _, re := range denylistWordPatterns {
+		if re.MatchString(structural) {
+			return "value matches " + re.String(), true
+		}
+		if re.MatchString(filename) {
+			return "filename matches " + re.String(), true
+		}
+	}
+	return "", false
+}
+
+// TestNoStaticIdentifiers generates 200 tokens of every type and fails if any
+// token value or filename matches the denylist of static identifiers.
+// Rule 12: NO static identifiers ("decoyd", "canary", "decoy" etc.) in generated files.
+func TestNoStaticIdentifiers(t *testing.T) {
+	allTypes := []string{
+		tokens.TypeAWSCredentials,
+		tokens.TypeSSHKey,
+		tokens.TypeEnvSecrets,
+		tokens.TypeGitHubPAT,
+		tokens.TypeSlackToken,
+		tokens.TypeKubeconfig,
+		tokens.TypeDBDump,
+		tokens.TypeDNSCanary,
+		// Phase 3 types
+		tokens.TypeNpmRC,
+		tokens.TypePypiRC,
+		tokens.TypeDockerConfig,
+		tokens.TypeGitCredentials,
+		tokens.TypeNetrc,
+		tokens.TypeTerraformCreds,
+		tokens.TypeVaultToken,
+		tokens.TypeMCPConfig,
+	}
+
+	const n = 200
+	for _, tt := range allTypes {
+		for i := 0; i < n; i++ {
+			tok, err := tokens.Generate(tt)
+			if err != nil {
+				t.Fatalf("Generate(%q) #%d error: %v", tt, i, err)
+			}
+			if reason, bad := findStaticIdentifier(tok.Value, tok.Filename); bad {
+				t.Errorf("type=%s token[%d] failed denylist: %s", tt, i, reason)
+			}
+		}
+	}
+
+	// Verify slow RSA-2048 types against Rule 12 as well.
+	for _, tt := range []string{tokens.TypeRSAKey, tokens.TypeGCPServiceAccount} {
+		tok, err := tokens.Generate(tt)
+		if err != nil {
+			t.Fatalf("Generate(%q) error: %v", tt, err)
+		}
+		if reason, bad := findStaticIdentifier(tok.Value, tok.Filename); bad {
+			t.Errorf("type=%s failed denylist: %s", tt, reason)
+		}
+	}
+}
+
+// TestNoStaticIdentifiers_CatchesBadTemplates proves the entropy-stripped denylist
+// still catches banned identifiers embedded directly in template text alongside
+// high-entropy random secret strings.
+func TestNoStaticIdentifiers_CatchesBadTemplates(t *testing.T) {
+	badTemplates := []struct {
+		word string
+		body string
+	}{
+		{"decoyd", "API_TOKEN=AbCdEfGhIjKlMnOpQrStUvWxYz012345\n# decoyd monitor\n"},
+		{"canary", "SECRET=AbCdEfGhIjKlMnOpQrStUvWxYz012345\nuser: canary_svc\n"},
+		{"decoy", "KEY=AbCdEfGhIjKlMnOpQrStUvWxYz012345\n# decoy credential\n"},
+		{"fake", "TOKEN=AbCdEfGhIjKlMnOpQrStUvWxYz012345\nhost = fake-db.internal\n"},
+		{"example", "HOST=example.internal\nPASS=AbCdEfGhIjKlMnOpQrStUvWxYz012345\n"},
+	}
+	for _, tc := range badTemplates {
+		reason, bad := findStaticIdentifier(tc.body, ".env")
+		if !bad {
+			t.Errorf("denylist failed to catch banned word %q in template %q", tc.word, tc.body)
+		} else {
+			t.Logf("caught %q (%s)", tc.word, reason)
+		}
+	}
+}
+
 // ── Generate dispatch ─────────────────────────────────────────────────────────
 
 func TestGenerate_UnknownType(t *testing.T) {
@@ -307,6 +427,17 @@ func TestGenerate_AllTypes(t *testing.T) {
 		tokens.TypeKubeconfig,
 		tokens.TypeDBDump,
 		tokens.TypeDNSCanary,
+		// Phase 3 types
+		tokens.TypeNpmRC,
+		tokens.TypePypiRC,
+		tokens.TypeDockerConfig,
+		tokens.TypeGitCredentials,
+		tokens.TypeNetrc,
+		// TypeRSAKey excluded: RSA-2048 keygen is too slow for 200x sampling
+		// TypeGCPServiceAccount excluded: RSA-2048 keygen is too slow for 200x
+		tokens.TypeTerraformCreds,
+		tokens.TypeVaultToken,
+		tokens.TypeMCPConfig,
 	}
 	for _, tt := range allTypes {
 		t.Run(tt, func(t *testing.T) {

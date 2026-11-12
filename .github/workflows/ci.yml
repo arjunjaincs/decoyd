@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: ["**"]
 
+# Minimal default permissions; individual jobs do not expand these.
+# Reference: https://docs.github.com/en/actions/security-guides/automatic-token-authentication#permissions-for-the-github_token
+permissions:
+  contents: read
+
 jobs:
   build-and-test:
     name: Build & Test (${{ matrix.os }} / GOOS=${{ matrix.goos }})
@@ -34,10 +39,26 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Check for UTF-8 BOM in Go source files
+        # Fails if any .go file starts with the UTF-8 byte-order mark (EF BB BF).
+        # BOMs in Go source files are invalid; the Go toolchain rejects them during
+        # coverage instrumentation even when normal compilation succeeds.
+        # This step runs only on Linux runners (grep -rP uses PCRE).
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          bad=$(grep -rlP '^\xef\xbb\xbf' --include='*.go' . || true)
+          if [ -n "$bad" ]; then
+            echo "ERROR: the following .go files start with a UTF-8 BOM:"
+            echo "$bad"
+            exit 1
+          fi
+          echo "OK: no .go files start with a UTF-8 BOM"
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           # "stable" resolves to the latest released Go patch (e.g. 1.26.5).
           # This is intentional for the build/test job: we want to know the
@@ -51,7 +72,7 @@ jobs:
           cache: false
 
       - name: Cache Go modules
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cache/go-build
@@ -87,15 +108,38 @@ jobs:
         run: go test -v -race ./...
 
   security:
-    name: Security Scan (govulncheck + gosec)
+    name: Security Scan (govulncheck + gosec + staticcheck + vet)
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Check for UTF-8 BOM in Go source files
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          bad=$(grep -rlP '^\xef\xbb\xbf' --include='*.go' . || true)
+          if [ -n "$bad" ]; then
+            echo "ERROR: the following .go files start with a UTF-8 BOM:"
+            echo "$bad"
+            exit 1
+          fi
+          echo "OK: no .go files start with a UTF-8 BOM"
+
+      - name: Check gofmt
+        shell: bash
+        run: |
+          bad=$(gofmt -l .)
+          if [ -n "$bad" ]; then
+            echo "ERROR: the following files are not gofmt-formatted:"
+            echo "$bad"
+            exit 1
+          fi
+          echo "OK: all files are gofmt-formatted"
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           # Use "stable" here specifically to avoid govulncheck false-positives.
           #
@@ -111,7 +155,7 @@ jobs:
           cache: false
 
       - name: Cache Go modules
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cache/go-build
@@ -120,14 +164,21 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-go-security-
 
+      - name: go vet
+        run: go vet ./...
+
       - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+        # Pinned to v1.9.0 — latest stable as of 2026-11-09.
+        # Reference: https://pkg.go.dev/golang.org/x/vuln/cmd/govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
 
       - name: Run govulncheck
         run: govulncheck ./...
 
       - name: Install gosec
-        run: go install github.com/securego/gosec/v2/cmd/gosec@latest
+        # Pinned to v2.30.0 — latest stable as of 2026-11-09.
+        # Reference: https://github.com/securego/gosec/releases
+        run: go install github.com/securego/gosec/v2/cmd/gosec@v2.30.0
 
       - name: Run gosec
         # -severity medium: skip informational findings.
@@ -137,3 +188,10 @@ jobs:
         #   G304 (file path via variable) is suppressed inline with #nosec comments
         #   at each site, documenting why each path is safe.
         run: gosec -severity medium -confidence medium -exclude G107 ./...
+
+      - name: Install staticcheck
+        # Pinned to v0.8.2 — exact version resolved in CI runs.
+        run: go install honnef.co/go/tools/cmd/staticcheck@v0.8.2
+
+      - name: Run staticcheck
+        run: staticcheck ./...

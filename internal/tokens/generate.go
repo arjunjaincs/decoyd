@@ -6,6 +6,8 @@ import (
 	"encoding/base64"
 	"encoding/pem"
 	"fmt"
+	"hash/crc32"
+	"math/big"
 	"strings"
 	"time"
 
@@ -19,10 +21,43 @@ import (
 const (
 	alphaNum      = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 	upperAlphaNum = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	base32Upper   = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
 	lowerAlpha    = "abcdefghijklmnopqrstuvwxyz"
 	digits        = "0123456789"
 	bcryptChars   = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789./"
 )
+
+// base62Dict is the alphabet for GitHub's base62 encoding of checksums.
+// Dictionary: 0-9A-Za-z, matching the reference implementation at
+// https://github.blog/security/application-security/behind-githubs-new-authentication-token-formats/
+// (split and dictionary sourced from a third-party reference implementation).
+const base62Dict = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+
+// ghpChecksum computes the 6-character base62 checksum for a GitHub PAT.
+// Algorithm: CRC32-IEEE of the 30-character entropy string, base62-encoded
+// with dictionary 0-9A-Za-z, left-padded with '0' to exactly 6 characters.
+// Test vector: entropy "zQWBuTSOoRi4A9spHcVY5ncnsDkxkJ" → checksum "0mLq17"
+// Source: https://github.blog/security/application-security/behind-githubs-new-authentication-token-formats/
+func ghpChecksum(entropy string) string {
+	crc := crc32.ChecksumIEEE([]byte(entropy))
+	n := big.NewInt(int64(crc))
+	base := big.NewInt(62)
+	rem := new(big.Int)
+	digits := make([]byte, 0, 6)
+	for n.Sign() > 0 {
+		n.DivMod(n, base, rem)
+		digits = append(digits, base62Dict[rem.Int64()])
+	}
+	// Reverse to get big-endian order.
+	for i, j := 0, len(digits)-1; i < j; i, j = i+1, j-1 {
+		digits[i], digits[j] = digits[j], digits[i]
+	}
+	// Left-pad with '0' to 6 characters.
+	for len(digits) < 6 {
+		digits = append([]byte{'0'}, digits...)
+	}
+	return string(digits)
+}
 
 // randStr returns n random chars from charset using crypto/rand.
 func randStr(n int, charset string) (string, error) {
@@ -63,7 +98,7 @@ func GenerateAWSCredentials() (Token, error) {
 		return Token{}, err
 	}
 
-	keyBody, err := randStr(16, upperAlphaNum)
+	keyBody, err := randStr(16, base32Upper)
 	if err != nil {
 		return Token{}, fmt.Errorf("aws key: %w", err)
 	}
@@ -202,18 +237,26 @@ INTERNAL_API_KEY=%s
 // ----------------------------------------------------------------------------
 
 // GenerateGitHubPAT generates a token matching GitHub's real ghp_ format.
-// Format: ghp_ + 36 lowercase alphanumeric chars.
+//
+// Format: ghp_ + 30 base62 entropy chars + 6-char checksum = 40 chars total.
+// The checksum is CRC32-IEEE of the 30-char entropy, base62-encoded with
+// dictionary 0-9A-Za-z, left-padded with zeros to 6 characters.
+//
+// Test vector: entropy "zQWBuTSOoRi4A9spHcVY5ncnsDkxkJ" → checksum "0mLq17"
+// See: https://github.blog/security/application-security/behind-githubs-new-authentication-token-formats/
+// (checksum split and dictionary from third-party reference implementation)
 func GenerateGitHubPAT() (Token, error) {
 	id, err := NewID()
 	if err != nil {
 		return Token{}, err
 	}
 
-	body, err := randStr(36, alphaNum)
+	entropy, err := randStr(30, base62Dict)
 	if err != nil {
-		return Token{}, fmt.Errorf("github pat: %w", err)
+		return Token{}, fmt.Errorf("github pat entropy: %w", err)
 	}
-	value := "ghp_" + body
+	checksum := ghpChecksum(entropy)
+	value := "ghp_" + entropy + checksum
 
 	return Token{
 		ID:        id,
@@ -264,18 +307,62 @@ func GenerateSlackToken() (Token, error) {
 // Kubeconfig
 // ----------------------------------------------------------------------------
 
-// GenerateKubeconfig generates a structurally valid kubeconfig YAML with fake
-// cluster endpoint and bearer token.
+// kubeClusterNames are plausible Kubernetes cluster names, matching real-world
+// naming patterns like those in kubectl config get-contexts output.
+var kubeClusterNames = []string{
+	"prod-eks-us-east-1",
+	"prod-eks-us-west-2",
+	"staging-eks-us-east-1",
+	"dev-eks-us-east-1",
+	"prod-gke-eu-west-1",
+	"staging-gke-eu-west-1",
+	"prod-aks-westus2",
+	"staging-aks-eastus",
+	"docker-desktop",
+	"minikube",
+	"kind-local",
+	"k3s-homelab",
+}
+
+// kubeUserNames are plausible Kubernetes user/service-account names.
+var kubeUserNames = []string{
+	"admin",
+	"deploy-bot",
+	"ci-runner",
+	"cluster-admin",
+	"devops",
+	"platform-team",
+	"sre-oncall",
+}
+
+// pickKubeName picks a random entry from a list using crypto/rand.
+func pickKubeName(list []string) (string, error) {
+	b := make([]byte, 1)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return list[int(b[0])%len(list)], nil
+}
+
+// GenerateKubeconfig generates a structurally valid kubeconfig YAML with
+// plausible cluster, user, and context names drawn from real-world patterns.
 func GenerateKubeconfig() (Token, error) {
 	id, err := NewID()
 	if err != nil {
 		return Token{}, err
 	}
 
-	clusterSuffix, err := randStr(12, lowerAlpha+digits)
+	clusterName, err := pickKubeName(kubeClusterNames)
 	if err != nil {
 		return Token{}, err
 	}
+	userName, err := pickKubeName(kubeUserNames)
+	if err != nil {
+		return Token{}, err
+	}
+	// Context name: "cluster/user" style, common in real kubectl configs.
+	contextName := clusterName + "/" + userName
+
 	caData, err := randB64(72)
 	if err != nil {
 		return Token{}, err
@@ -285,25 +372,47 @@ func GenerateKubeconfig() (Token, error) {
 		return Token{}, err
 	}
 
+	// Generate a plausible server FQDN based on the cluster name.
+	var serverHost string
+	switch {
+	case strings.HasPrefix(clusterName, "prod-eks-"):
+		region := strings.TrimPrefix(clusterName, "prod-eks-")
+		serverHost = "eks." + region + ".amazonaws.com"
+	case strings.HasPrefix(clusterName, "staging-eks-"):
+		region := strings.TrimPrefix(clusterName, "staging-eks-")
+		serverHost = "eks." + region + ".amazonaws.com"
+	case strings.HasPrefix(clusterName, "dev-eks-"):
+		region := strings.TrimPrefix(clusterName, "dev-eks-")
+		serverHost = "eks." + region + ".amazonaws.com"
+	case strings.HasPrefix(clusterName, "prod-gke-"):
+		serverHost = "container.googleapis.com"
+	case strings.HasPrefix(clusterName, "staging-gke-"):
+		serverHost = "container.googleapis.com"
+	case strings.HasPrefix(clusterName, "prod-aks-") || strings.HasPrefix(clusterName, "staging-aks-"):
+		serverHost = clusterName + ".hcp.eastus.azmk8s.io"
+	default:
+		serverHost = "127.0.0.1:6443"
+	}
+
 	value := fmt.Sprintf(`apiVersion: v1
 kind: Config
 clusters:
 - cluster:
-    server: https://k8s-%s.internal:6443
+    server: https://%s
     certificate-authority-data: %s
-  name: decoy-cluster
+  name: %s
 contexts:
 - context:
-    cluster: decoy-cluster
-    user: decoy-admin
-  name: decoy-context
-current-context: decoy-context
+    cluster: %s
+    user: %s
+  name: %s
+current-context: %s
 preferences: {}
 users:
-- name: decoy-admin
+- name: %s
   user:
     token: %s
-`, clusterSuffix, caData, bearerToken)
+`, serverHost, caData, clusterName, clusterName, userName, contextName, contextName, userName, bearerToken)
 
 	return Token{
 		ID:        id,
@@ -330,7 +439,7 @@ func GenerateDBDump() (Token, error) {
 		return Token{}, err
 	}
 
-	// Fake bcrypt-style password hashes.
+	// Bcrypt-style password hashes (realistic structure).
 	makeHash := func() (string, error) {
 		salt, err := randStr(22, bcryptChars)
 		if err != nil {
@@ -433,22 +542,15 @@ func GenerateDNSCanary() (Token, error) {
 		return Token{}, fmt.Errorf("dns label: %w", err)
 	}
 
-	value := fmt.Sprintf(`# DNS Canary Token
-# Label: %s
-#
-# Create a DNS record for this label on a domain you control:
-#   %s.<your-domain>  IN  A  <any-IP>   (or CNAME to a sink)
-#
-# Decoyd will alert when a DNS query for this hostname is detected
-# (requires DNS provider log access — configured in Phase 4).
-label=%s
-`, label, label, label)
+	// Value holds only the bare label — no instruction text.
+	// Instructions are shown in the TUI at generation time (not stored in the file).
+	value := "label=" + label + "\n"
 
 	return Token{
 		ID:        id,
 		Type:      TypeDNSCanary,
 		Value:     value,
-		Filename:  "dns_canary.txt",
+		Filename:  "token.txt",
 		CreatedAt: now(),
 	}, nil
 }

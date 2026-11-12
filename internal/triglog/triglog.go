@@ -19,6 +19,9 @@ import (
 	"path/filepath"
 	"sort"
 	"time"
+
+	"github.com/arjunjaincs/decoyd/internal/attribution"
+	"github.com/arjunjaincs/decoyd/internal/filelock"
 )
 
 // ----------------------------------------------------------------------------
@@ -67,6 +70,14 @@ type TriggerEvent struct {
 	// AlertError is a sanitized error string when Status == TriggerFailed. Empty otherwise.
 	// Guaranteed never to contain webhook URLs or bot tokens.
 	AlertError string `json:"alert_error,omitempty"`
+
+	// WatcherTier is "tier1" (fanotify) or "tier2" (inotify). Empty for pre-T5 events.
+	// Schema version: 1 (T5).
+	WatcherTier string `json:"watcher_tier,omitempty"`
+
+	// Attribution is the process and package attribution for Tier 1 events.
+	// Nil for Tier 2 events (inotify does not provide pid). Schema version: 1 (T5).
+	Attribution *attribution.Attribution `json:"attribution,omitempty"`
 }
 
 // ----------------------------------------------------------------------------
@@ -93,9 +104,7 @@ func logPath(dataDir string) string {
 // Append marshals te to JSON and appends it as a newline-terminated record to
 // dataDir/triggers.jsonl. The file is created with 0600 permissions if absent.
 // Append is the only mutation operation: records are never edited or deleted.
-//
-// Safe to call from multiple goroutines in the same process only if the caller
-// holds an external mutex; the underlying os.OpenFile call is not atomic.
+// It serializes concurrent callers through a file lock on triggers.jsonl.lock.
 func Append(dataDir string, te TriggerEvent) error {
 	if te.ID == "" {
 		return ErrEmptyID
@@ -107,16 +116,31 @@ func Append(dataDir string, te TriggerEvent) error {
 	}
 
 	path := logPath(dataDir)
+	lf, err := filelock.Lock(path)
+	if err != nil {
+		return fmt.Errorf("triglog lock: %w", err)
+	}
+	defer lf.Unlock()
+
 	// #nosec G304 -- path is always filepath.Join(dataDir, logFileName), never user input
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("triglog open: %w", err)
 	}
-	defer f.Close()
+	closed := false
+	defer func() {
+		if !closed {
+			_ = f.Close()
+		}
+	}()
 
 	data = append(data, '\n')
 	if _, err := f.Write(data); err != nil {
 		return fmt.Errorf("triglog write: %w", err)
+	}
+	closed = true
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("triglog close: %w", err)
 	}
 	return nil
 }
@@ -138,7 +162,7 @@ func Load(dataDir string) ([]TriggerEvent, error) {
 		}
 		return nil, fmt.Errorf("triglog open: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	// latest-record-per-ID deduplication map; preserves last occurrence.
 	seen := make(map[string]TriggerEvent)
@@ -201,7 +225,13 @@ func LoadByToken(dataDir, tokenID string) ([]TriggerEvent, error) {
 // Returns nil if the file did not exist.
 func ClearAll(dataDir string) error {
 	path := logPath(dataDir)
-	err := os.Remove(path)
+	lf, err := filelock.Lock(path)
+	if err != nil {
+		return fmt.Errorf("triglog lock: %w", err)
+	}
+	defer lf.Unlock()
+
+	err = os.Remove(path)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("triglog clear: %w", err)
 	}
@@ -217,11 +247,66 @@ func ClearAll(dataDir string) error {
 // remove a record after the fact. The rewrite is atomic: a temp file is
 // written first and then renamed over the original so a crash mid-write
 // cannot corrupt the log.
+// loadLocked reads and parses the triglog at path without acquiring the filelock.
+// Must only be called while the caller already holds the lock for path.
+func loadLocked(path string) ([]TriggerEvent, error) {
+	// #nosec G304 -- path is always filepath.Join(dataDir, logFileName)
+	f, err := os.Open(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("triglog open: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	// Inline scan: same deduplication logic as Load.
+	seen := make(map[string]TriggerEvent)
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var te TriggerEvent
+		if err := json.Unmarshal(line, &te); err != nil {
+			continue
+		}
+		if te.ID != "" {
+			seen[te.ID] = te
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("triglog scan: %w", err)
+	}
+	events := make([]TriggerEvent, 0, len(seen))
+	for _, te := range seen {
+		events = append(events, te)
+	}
+	sort.Slice(events, func(i, j int) bool {
+		return events[i].TriggeredAt.After(events[j].TriggeredAt)
+	})
+	return events, nil
+}
+
 func DeleteOne(dataDir, id string) error {
 	if id == "" {
 		return nil
 	}
-	all, err := Load(dataDir)
+
+	// Acquire the lock BEFORE reading so that events appended concurrently
+	// are not silently discarded by the subsequent write-back.
+	// (Previously, Load ran outside the lock, creating a window where
+	// concurrent Appends were lost when DeleteOne rewrote the file.)
+	path := logPath(dataDir)
+	lf, err := filelock.Lock(path)
+	if err != nil {
+		return fmt.Errorf("triglog lock: %w", err)
+	}
+	defer lf.Unlock()
+
+	// Re-read under the lock to get the authoritative set.
+	all, err := loadLocked(path)
 	if err != nil {
 		return err
 	}
@@ -237,10 +322,8 @@ func DeleteOne(dataDir, id string) error {
 		return nil // nothing to do
 	}
 
-	// Write a temp file, then rename.
-	path := logPath(dataDir)
 	tmp := path + ".tmp"
-	// #nosec G304
+	// #nosec G304 -- tmp is always filepath.Join(dataDir, logFileName)+".tmp"
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("triglog rewrite open: %w", err)
@@ -263,6 +346,12 @@ func DeleteOne(dataDir, id string) error {
 			_ = os.Remove(tmp)
 			return fmt.Errorf("triglog rewrite write: %w", werr)
 		}
+	}
+	// Fsync before rename to ensure data is durable on the target filesystem.
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("triglog rewrite sync: %w", err)
 	}
 	if err := f.Close(); err != nil {
 		_ = os.Remove(tmp)

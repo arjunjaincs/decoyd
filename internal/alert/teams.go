@@ -37,6 +37,7 @@ type teamsFact struct {
 // --- Send -------------------------------------------------------------------
 
 func (a *TeamsAlerter) Send(ctx context.Context, p AlertPayload) error {
+	p = p.Sanitized() // strip ANSI, bidi, C0/C1 from all user-controlled fields
 	detail := p.Detail
 	if detail == "" {
 		detail = "(none)"

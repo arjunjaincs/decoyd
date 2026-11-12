@@ -22,6 +22,15 @@ Restart=on-failure
 RestartSec=5s
 # Keep the bbolt database accessible to the running user only.
 UMask=0077
+# Security hardening: directives that work without user namespaces.
+# ProtectSystem/PrivateTmp require user namespaces (disabled in many
+# WSL and container environments) and are intentionally omitted.
+NoNewPrivileges=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+MemoryDenyWriteExecute=yes
 
 [Install]
 WantedBy=default.target
@@ -41,31 +50,30 @@ func cmdInstall(dataDir string) error {
 
 	// User systemd unit directory.
 	unitDir := filepath.Join(os.Getenv("HOME"), ".config", "systemd", "user")
-	// #nosec G703 -- unitDir is filepath.Join(HOME, ".config/systemd/user"): same
-	// reasoning as the OpenFile suppression below — HOME is the running user's own
-	// home directory, set by their login shell; not attacker-controlled.
-	if err := os.MkdirAll(unitDir, 0o700); err != nil {
+	if err := os.MkdirAll(unitDir, 0o700); err != nil { // #nosec G703 -- unitDir is $HOME/.config/systemd/user for user-scoped systemd unit
 		return fmt.Errorf("create systemd user dir: %w", err)
 	}
 	unitPath := filepath.Join(unitDir, "decoyd.service")
 
-	// #nosec G304 G703 -- unitPath is filepath.Join(HOME, ".config/systemd/user/decoyd.service"):
-	// the only variable component is HOME, which is set by the login shell of the
-	// owning user — the same user who runs 'decoyd install' to install a service for
-	// themselves. An attacker who can control HOME already has direct write access to
-	// ~/.config/systemd/user/ without decoyd's involvement. The filename component
-	// ("decoyd.service") is a hardcoded constant.
-	f, err := os.OpenFile(unitPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	f, err := os.OpenFile(unitPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600) // #nosec G304 G703 -- unitPath is $HOME/.config/systemd/user/decoyd.service with fixed filename
 	if err != nil {
 		return fmt.Errorf("write unit file: %w", err)
 	}
-	defer f.Close()
+	closed := false
+	defer func() {
+		if !closed {
+			_ = f.Close()
+		}
+	}()
 
 	tmpl := template.Must(template.New("unit").Parse(systemdUnitTemplate))
-	if err := tmpl.Execute(f, struct{ ExecPath string }{ExecPath: execPath}); err != nil {
+	if err := tmpl.Execute(f, struct{ ExecPath string }{ExecPath: quoteExecStart(execPath)}); err != nil {
 		return fmt.Errorf("render unit: %w", err)
 	}
-	_ = f.Close()
+	closed = true
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close unit file: %w", err)
+	}
 
 	fmt.Println("unit file written:", unitPath)
 

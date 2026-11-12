@@ -1,0 +1,10 @@
+{
+  "name": "demo-evil-pkg",
+  "version": "0.0.1",
+  "description": "BENIGN TEST PACKAGE — demonstrates how a malicious npm postinstall script might scan credential files. Used with Decoyd to test detection.",
+  "scripts": {
+    "postinstall": "node postinstall.js"
+  },
+  "keywords": ["decoyd", "test", "benign"],
+  "license": "Apache-2.0"
+}

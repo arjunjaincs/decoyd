@@ -22,7 +22,7 @@ func openTestStore(t *testing.T) (*store.Store, string) {
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
-	t.Cleanup(func() { st.Close() })
+	t.Cleanup(func() { _ = st.Close() })
 	return st, dir
 }
 
@@ -46,7 +46,9 @@ func captureStdout(t *testing.T, f func()) string {
 	orig := os.Stdout
 	os.Stdout = w
 	f()
-	w.Close()
+	if err := w.Close(); err != nil {
+		t.Fatalf("w.Close: %v", err)
+	}
 	os.Stdout = orig
 	var buf bytes.Buffer
 	if _, err := io.Copy(&buf, r); err != nil {

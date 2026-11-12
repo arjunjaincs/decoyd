@@ -6,18 +6,23 @@ package alert
 import (
 	"bytes"
 	"context"
+
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/arjunjaincs/decoyd/internal/sanitize"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
 	"time"
+
+	"github.com/arjunjaincs/decoyd/internal/filelock"
 )
 
 // ----------------------------------------------------------------------------
@@ -32,6 +37,25 @@ type AlertPayload struct {
 	Path        string    `json:"path"`
 	TriggeredAt time.Time `json:"triggered_at"`
 	Detail      string    `json:"detail"`
+}
+
+// Sanitized returns a copy of p with every string field run through
+// sanitize.Sanitize at an appropriate length cap. Call this at the top of
+// every alerter's Send implementation so that raw paths, process names, and
+// any other external strings cannot carry ANSI escapes, bidi overrides, or
+// C0/C1 control characters into the wire format.
+//
+// Per-sink escaping (Discord allowed_mentions, Slack plain_text, etc.) is
+// still the alerter's responsibility; Sanitized() only strips dangerous
+// unicode and control characters.
+func (p AlertPayload) Sanitized() AlertPayload {
+	return AlertPayload{
+		TokenID:     sanitize.Sanitize(p.TokenID, 64),
+		TokenType:   sanitize.Sanitize(p.TokenType, 64),
+		Path:        sanitize.Sanitize(p.Path, 512),
+		TriggeredAt: p.TriggeredAt,
+		Detail:      sanitize.Sanitize(p.Detail, 512),
+	}
 }
 
 // Alerter is the pluggable notification interface.
@@ -189,11 +213,25 @@ const configFileName = "alert_config.json"
 
 // Load reads and decodes alert_config.json from dataDir.
 // Returns an empty AlertConfig (not an error) when the file does not exist yet.
-// If any channel entry is missing an ID (legacy config), Load backfills IDs
-// and persists the updated file before returning.
+// If any channel entry is missing an ID (legacy config), Load returns the in-memory
+// config with IDs filled.  When any channel was missing an ID on disk,
+// Load persists the backfilled IDs atomically under a filelock so that
+// subsequent calls return the same IDs without the caller needing to Save.
 func Load(dataDir string) (AlertConfig, error) {
 	path := filepath.Join(dataDir, configFileName)
-	data, err := os.ReadFile(path) // #nosec G304 -- path is always filepath.Join(dataDir, configFileName), never user input
+	var data []byte
+	var err error
+	for attempt := 0; attempt < 25; attempt++ {
+		data, err = os.ReadFile(path) // #nosec G304 -- path is always filepath.Join(dataDir, configFileName), never user input
+		if err == nil || errors.Is(err, os.ErrNotExist) {
+			break
+		}
+		if runtime.GOOS == "windows" {
+			time.Sleep(time.Duration(attempt+1) * 5 * time.Millisecond)
+			continue
+		}
+		break
+	}
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return AlertConfig{}, nil
@@ -205,69 +243,119 @@ func Load(dataDir string) (AlertConfig, error) {
 		return AlertConfig{}, fmt.Errorf("parse alert config: %w", err)
 	}
 	// Backfill IDs for any channel entry that predates the ID field.
-	// If any were missing, persist the healed config immediately.
-	needsSave := false
-	for i := range cfg.Channels {
-		if cfg.Channels[i].ID == "" {
-			id, err := GenerateChannelID()
-			if err != nil {
-				return AlertConfig{}, fmt.Errorf("backfill channel ID: %w", err)
+	needsWrite, err := backfillConfigIDs(&cfg)
+	if err != nil {
+		return AlertConfig{}, err
+	}
+	// Persist backfilled IDs atomically so the next Load call returns the same
+	// IDs without requiring the caller to Save first. Holding filelock prevents
+	// concurrent Loads from generating diverging IDs or racing with Save.
+	if needsWrite {
+		if lf, lerr := filelock.Lock(path); lerr == nil {
+			// Re-read under lock so a concurrent Load or Save is never clobbered.
+			if fresh, rerr := os.ReadFile(path); rerr == nil { // #nosec G304 -- path is always filepath.Join(dataDir, configFileName), never user input
+				var freshCfg AlertConfig
+				if jerr := json.Unmarshal(fresh, &freshCfg); jerr == nil {
+					freshMissing, err := backfillConfigIDsFrom(&freshCfg, cfg)
+					if err == nil {
+						cfg = freshCfg
+						if freshMissing {
+							_ = writeConfigAtomic(path, cfg)
+						}
+					}
+				}
 			}
-			cfg.Channels[i].ID = id
-			needsSave = true
+			lf.Unlock()
 		}
-	}
-	// Also backfill DefaultID if it's missing but channels exist.
-	if cfg.DefaultID == "" && len(cfg.Channels) > 0 {
-		cfg.DefaultID = cfg.Channels[0].ID
-		needsSave = true
-	}
-	if needsSave {
-		// Best-effort: don't return an error if the backfill write fails
-		// (e.g. read-only filesystem), just return the in-memory config.
-		_ = Save(dataDir, cfg)
+		// Errors from the persistence step are non-fatal: the in-memory cfg
+		// still has the backfilled IDs for this call.
 	}
 	return cfg, nil
 }
 
-// Save marshals cfg to JSON and writes it atomically to dataDir/alert_config.json.
-// The file is created with permission 0600 so only the owning user can read
-// the webhook URLs and bot tokens stored inside.
-// Save assigns IDs to any channel entry that is missing one before writing.
-func Save(dataDir string, cfg AlertConfig) error {
-	// Assign IDs to any channel that doesn't have one yet.
+// backfillConfigIDs assigns missing channel IDs and DefaultID, reporting
+// whether any field was modified.
+func backfillConfigIDs(cfg *AlertConfig) (bool, error) {
+	return backfillConfigIDsFrom(cfg, AlertConfig{})
+}
+
+// backfillConfigIDsFrom fills any missing channel IDs in cfg, reusing matching
+// positional IDs from prev when available so concurrent first-time Loaders
+// converge on the same identifiers.
+func backfillConfigIDsFrom(cfg *AlertConfig, prev AlertConfig) (bool, error) {
+	changed := false
 	for i := range cfg.Channels {
-		if cfg.Channels[i].ID == "" {
+		if cfg.Channels[i].ID != "" {
+			continue
+		}
+		if i < len(prev.Channels) && prev.Channels[i].ID != "" {
+			cfg.Channels[i].ID = prev.Channels[i].ID
+		} else {
 			id, err := GenerateChannelID()
 			if err != nil {
-				return fmt.Errorf("assign channel ID: %w", err)
+				return false, fmt.Errorf("backfill channel ID: %w", err)
 			}
 			cfg.Channels[i].ID = id
 		}
+		changed = true
 	}
-	// Ensure DefaultID is set when channels exist.
 	if cfg.DefaultID == "" && len(cfg.Channels) > 0 {
 		cfg.DefaultID = cfg.Channels[0].ID
+		changed = true
 	}
+	return changed, nil
+}
+
+// writeConfigAtomic marshals cfg and installs it at path via a temporary file
+// and rename. Callers must hold filelock.Lock(path).
+func writeConfigAtomic(path string, cfg AlertConfig) error {
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal alert config: %w", err)
 	}
-	path := filepath.Join(dataDir, configFileName)
 	tmp := path + ".tmp"
-
-	if err := os.WriteFile(tmp, data, 0o600); err != nil { // #nosec G304 -- tmp is always filepath.Join(dataDir, configFileName)+".tmp", never user input
+	if err := os.WriteFile(tmp, data, 0o600); err != nil { // #nosec G304,G306 -- tmp is filepath.Join(dataDir, configFileName)+".tmp" with restrictive 0600 permissions
 		return fmt.Errorf("write alert config: %w", err)
 	}
 	if runtime.GOOS != "windows" {
 		// Belt-and-suspenders: WriteFile honours umask so we chmod explicitly.
 		_ = os.Chmod(tmp, 0o600)
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	var renameErr error
+	for attempt := 0; attempt < 25; attempt++ {
+		renameErr = os.Rename(tmp, path)
+		if renameErr == nil {
+			break
+		}
+		if runtime.GOOS == "windows" {
+			time.Sleep(time.Duration(attempt+1) * 10 * time.Millisecond)
+			continue
+		}
+		break
+	}
+	if renameErr != nil {
 		_ = os.Remove(tmp)
-		return fmt.Errorf("install alert config: %w", err)
+		return fmt.Errorf("install alert config: %w", renameErr)
 	}
 	return nil
+}
+
+// Save marshals cfg to JSON and writes it atomically to dataDir/alert_config.json
+// while holding the per-file advisory lock shared with Load.
+// The file is created with permission 0600 so only the owning user can read
+// the webhook URLs and bot tokens stored inside.
+// Save assigns IDs to any channel entry that is missing one before writing.
+func Save(dataDir string, cfg AlertConfig) error {
+	if _, err := backfillConfigIDs(&cfg); err != nil {
+		return fmt.Errorf("assign channel ID: %w", err)
+	}
+	path := filepath.Join(dataDir, configFileName)
+	lf, err := filelock.Lock(path)
+	if err != nil {
+		return fmt.Errorf("lock alert config: %w", err)
+	}
+	defer lf.Unlock()
+	return writeConfigAtomic(path, cfg)
 }
 
 // ----------------------------------------------------------------------------
@@ -356,6 +444,38 @@ func dots(n int) string {
 // alertTimeout is the per-request deadline applied by every Alerter.
 const alertTimeout = 10 * time.Second
 
+// alertResponseBodyLimit is the maximum number of bytes read from an alert
+// webhook response body. Responses beyond this limit are silently truncated.
+const alertResponseBodyLimit = 64 * 1024
+
+// ErrWebhookRedirected is returned when an alert webhook URL returns a redirect.
+// Webhook URLs must not redirect; update the URL to point directly to the endpoint.
+var ErrWebhookRedirected = errors.New("webhook URL redirected")
+
+// alertHTTPClient is the shared HTTP client used by all alerters.
+// It enforces connection, TLS, and response-header timeouts, and refuses
+// to follow redirects (webhook URLs must not redirect).
+var alertHTTPClient = &http.Client{
+	Transport: &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout: 5 * time.Second,
+		}).DialContext,
+		TLSHandshakeTimeout:   5 * time.Second,
+		ResponseHeaderTimeout: 10 * time.Second,
+	},
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		// Extract the host from the redirect target to include in the error,
+		// but never the full URL (may contain secrets in the path).
+		redirectHost := ""
+		if req.URL != nil {
+			redirectHost = req.URL.Host
+		}
+		// Return a typed error so callers can detect it; sanitizeErr will
+		// strip the URL from the *url.Error wrapper net/http adds.
+		return fmt.Errorf("%w to %s, update the URL", ErrWebhookRedirected, redirectHost)
+	},
+}
+
 // doPost marshals body to JSON, POSTs it to rawURL with Content-Type
 // application/json, and returns a sanitized error on failure.
 func doPost(ctx context.Context, rawURL string, body any) error {
@@ -372,12 +492,17 @@ func doPost(ctx context.Context, rawURL string, body any) error {
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := alertHTTPClient.Do(req)
 	if err != nil {
+		// Unwrap ErrWebhookRedirected from net/http's *url.Error wrapping.
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) && errors.Is(urlErr.Err, ErrWebhookRedirected) {
+			return urlErr.Err
+		}
 		return sanitizeErr(err)
 	}
 	defer func() {
-		_, _ = io.Copy(io.Discard, resp.Body)
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, alertResponseBodyLimit))
 		resp.Body.Close()
 	}()
 
@@ -401,12 +526,16 @@ func doPostText(ctx context.Context, rawURL, body string, headers map[string]str
 		req.Header.Set(k, v)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := alertHTTPClient.Do(req)
 	if err != nil {
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) && errors.Is(urlErr.Err, ErrWebhookRedirected) {
+			return urlErr.Err
+		}
 		return sanitizeErr(err)
 	}
 	defer func() {
-		_, _ = io.Copy(io.Discard, resp.Body)
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, alertResponseBodyLimit))
 		resp.Body.Close()
 	}()
 
@@ -442,4 +571,3 @@ func SanitizeErrString(err error) string {
 	}
 	return sanitizeErr(err).Error()
 }
-

@@ -56,9 +56,13 @@ func cmdInstall(dataDir string) error {
 		`$action.Arguments = 'watch'`,
 		`$folder.RegisterTaskDefinition('DecoydWatch', $task, 6, $userId, $null, 3) | Out-Null`,
 	}
-	psScript := strings.Join(psLines, "; ")
+	psScript := strings.Join(psLines, "\n")
 
-	cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", psScript) // #nosec G204 -- fixed arguments, no user input
+	// Pass the script via -EncodedCommand (UTF-16LE base64) to avoid any
+	// quoting or encoding issues that arise with -Command when the executable
+	// path contains spaces, quotes, or non-ASCII characters (e.g. U+2019).
+	encoded := encodedPSCommand(psScript)
+	cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded) // #nosec G204 -- fixed arguments, no user input
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {

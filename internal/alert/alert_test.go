@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -797,7 +798,21 @@ func TestLoad_BackfillsLegacyConfigWithoutIDs(t *testing.T) {
 	if cfg.DefaultID == "" {
 		t.Error("Load() did not set DefaultID from backfill")
 	}
-	// Verify it was also persisted to disk.
+	// Verify it was also persisted to disk without calling Save.
+	raw, err := os.ReadFile(filepath.Join(dir, configFileName))
+	if err != nil {
+		t.Fatalf("ReadFile after Load: %v", err)
+	}
+	var persisted AlertConfig
+	if err := json.Unmarshal(raw, &persisted); err != nil {
+		t.Fatalf("unmarshal persisted config: %v", err)
+	}
+	if len(persisted.Channels) != 1 || persisted.Channels[0].ID != cfg.Channels[0].ID {
+		t.Errorf("backfill IDs not persisted to disk: disk=%+v load=%+v", persisted, cfg)
+	}
+	if persisted.DefaultID != cfg.DefaultID {
+		t.Errorf("DefaultID not persisted to disk: disk=%q load=%q", persisted.DefaultID, cfg.DefaultID)
+	}
 	reloaded, err := Load(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -845,3 +860,226 @@ func TestMultiChannel_RoundTrip(t *testing.T) {
 	}
 }
 
+// ── B3: stable IDs across multiple Load calls ─────────────────────────────────
+
+// TestLoad_TwoLoadsGiveSameIDs proves that loading a legacy config (no IDs on disk)
+// twice without any Save gives identical IDs both times.
+// Before B3, Load generated fresh IDs on every call, breaking per-token routing.
+func TestLoad_TwoLoadsGiveSameIDs(t *testing.T) {
+	dir := t.TempDir()
+	legacyJSON := `{"channels":[{"type":"discord","webhook_url":"https://discord.example"}],"default_index":0}`
+	path := dir + "/alert_config.json"
+	if err := os.WriteFile(path, []byte(legacyJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// First Load: backfills and persists IDs atomically once.
+	cfg1, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load #1 error: %v", err)
+	}
+	if cfg1.Channels[0].ID == "" {
+		t.Fatal("Load #1: channel ID not backfilled")
+	}
+	fi1, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat after Load #1: %v", err)
+	}
+	// Second Load WITHOUT any intervening Save — IDs must be identical,
+	// and disk file must not be rewritten when IDs already exist.
+	cfg2, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load #2 error: %v", err)
+	}
+	fi2, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat after Load #2: %v", err)
+	}
+	if !os.SameFile(fi1, fi2) {
+		t.Error("Load #2 rewrote alert_config.json even though IDs were already persisted")
+	}
+	if cfg2.Channels[0].ID != cfg1.Channels[0].ID {
+		t.Errorf("IDs differ: Load#1=%q Load#2=%q; must be stable across calls",
+			cfg1.Channels[0].ID, cfg2.Channels[0].ID)
+	}
+	if cfg2.DefaultID != cfg1.DefaultID {
+		t.Errorf("DefaultID differs: Load#1=%q Load#2=%q", cfg1.DefaultID, cfg2.DefaultID)
+	}
+}
+
+// TestLoad_PerTokenChannelRoutingAfterSecondLoad verifies that a token bound
+// to a backfilled AlertChannelID from an initial Load still routes to that exact
+// channel after a second Load (with no Save in between).
+func TestLoad_PerTokenChannelRoutingAfterSecondLoad(t *testing.T) {
+	dir := t.TempDir()
+	legacyJSON := `{"channels":[{"type":"discord","webhook_url":"https://discord.example"},{"type":"slack","webhook_url":"https://slack.example"}],"default_index":0}`
+	if err := os.WriteFile(filepath.Join(dir, configFileName), []byte(legacyJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg1, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load #1 error: %v", err)
+	}
+	if len(cfg1.Channels) != 2 || cfg1.Channels[1].ID == "" {
+		t.Fatalf("unexpected channels after Load #1: %+v", cfg1.Channels)
+	}
+	assignedID := cfg1.Channels[1].ID
+
+	cfg2, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load #2 error: %v", err)
+	}
+	ch, ok := cfg2.ChannelForToken(assignedID)
+	if !ok {
+		t.Fatalf("ChannelForToken(%q) returned ok=false after second Load", assignedID)
+	}
+	if ch.ID != assignedID || ch.Type != ChannelSlack || ch.WebhookURL != "https://slack.example" {
+		t.Errorf("routed channel mismatch: got %+v, want ID=%q type=slack", ch, assignedID)
+	}
+}
+
+// TestLoad_ConcurrentLoadAndSave proves concurrent Load+Save never loses a user change,
+// including when concurrent Loads race on a legacy config lacking channel IDs.
+func TestLoad_ConcurrentLoadAndSave(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, configFileName)
+	legacyJSON := `{"channels":[{"type":"discord","webhook_url":"https://discord.initial"}],"default_index":0}`
+	if err := os.WriteFile(path, []byte(legacyJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Concurrently: many goroutines Load (including legacy backfill) while one
+	// goroutine applies user edits via Save. Lock serialization ensures neither
+	// .tmp collides nor stale Load overwrites the user's final Save.
+	const n = 20
+	errCh := make(chan error, n+1)
+	for i := 0; i < n; i++ {
+		go func() {
+			for j := 0; j < 3; j++ {
+				cfg, err := Load(dir)
+				if err != nil {
+					errCh <- fmt.Errorf("Load error: %w", err)
+					return
+				}
+				if len(cfg.Channels) == 0 {
+					errCh <- fmt.Errorf("Load returned empty channels")
+					return
+				}
+			}
+			errCh <- nil
+		}()
+	}
+	go func() {
+		for i := 0; i < 10; i++ {
+			updated := AlertConfig{
+				Channels: []ChannelConfig{
+					{Type: ChannelDiscord, WebhookURL: fmt.Sprintf("https://discord.updated/%d", i), ID: "ch-aaa"},
+					{Type: ChannelSlack, WebhookURL: "https://slack.user-added", ID: "ch-bbb"},
+				},
+				DefaultID: "ch-aaa",
+			}
+			if err := Save(dir, updated); err != nil {
+				errCh <- fmt.Errorf("Save error: %w", err)
+				return
+			}
+		}
+		errCh <- nil
+	}()
+	for i := 0; i < n+1; i++ {
+		if err := <-errCh; err != nil {
+			t.Error(err)
+		}
+	}
+	// After all concurrent activity, the final Save's user changes must still be present.
+	final, err := Load(dir)
+	if err != nil {
+		t.Fatalf("final Load: %v", err)
+	}
+	if len(final.Channels) != 2 || final.Channels[0].WebhookURL != "https://discord.updated/9" || final.Channels[1].WebhookURL != "https://slack.user-added" {
+		t.Errorf("concurrent Load/Save lost user change: got %+v", final)
+	}
+}
+
+// ----------------------------------------------------------------------------
+// HTTP client hardening (A8)
+// ----------------------------------------------------------------------------
+
+// redirectServer starts an httptest server that always returns a 302 redirect.
+func redirectServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://example.internal/redirected", http.StatusFound)
+	}))
+}
+
+// hugeBodyServer returns a 200 OK with a body larger than alertResponseBodyLimit.
+func hugeBodyServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	big := make([]byte, alertResponseBodyLimit+1024)
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(big)
+	}))
+}
+
+// responseHeaderSlowServer sleeps before writing response headers.
+// The sleep duration (2s) is long enough that a 50ms client timeout fires first,
+// but short enough that httptest.Server.Close() drains the in-flight request
+// within the 5-second watchdog.
+func responseHeaderSlowServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(2 * time.Second)
+		w.WriteHeader(http.StatusOK)
+	}))
+}
+
+func TestDoPost_RedirectRefused(t *testing.T) {
+	ts := redirectServer(t)
+	defer ts.Close()
+
+	err := (&WebhookAlerter{webhookURL: ts.URL}).Send(context.Background(), testPayload())
+	if err == nil {
+		t.Fatal("expected error when webhook redirects, got nil")
+	}
+	if !errors.Is(err, ErrWebhookRedirected) {
+		t.Errorf("expected ErrWebhookRedirected; got: %v", err)
+	}
+	if strings.Contains(err.Error(), "example.internal/redirected") {
+		t.Errorf("error leaks redirect path: %v", err)
+	}
+}
+
+func TestDoPost_HugeBodyTruncated(t *testing.T) {
+	ts := hugeBodyServer(t)
+	defer ts.Close()
+
+	err := (&WebhookAlerter{webhookURL: ts.URL}).Send(context.Background(), testPayload())
+	if err != nil {
+		t.Fatalf("expected success for huge-body 200 response; got: %v", err)
+	}
+}
+
+func TestDoPost_SlowResponseHeader(t *testing.T) {
+	// Use a short-timeout client so the test runs quickly.
+	shortClient := &http.Client{
+		Transport: &http.Transport{
+			ResponseHeaderTimeout: 50 * time.Millisecond,
+		},
+		CheckRedirect: alertHTTPClient.CheckRedirect,
+	}
+	orig := alertHTTPClient
+	alertHTTPClient = shortClient
+	defer func() { alertHTTPClient = orig }()
+
+	ts := responseHeaderSlowServer(t)
+	defer ts.Close()
+
+	err := (&WebhookAlerter{webhookURL: ts.URL}).Send(context.Background(), testPayload())
+	if err == nil {
+		t.Fatal("expected timeout error for slow response headers, got nil")
+	}
+	if strings.Contains(err.Error(), ts.URL) {
+		t.Errorf("error leaks URL: %v", err)
+	}
+}
