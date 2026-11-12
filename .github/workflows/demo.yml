@@ -1,0 +1,137 @@
+# .github/workflows/demo.yml
+# Runnable GitHub Actions demo workflow showcasing Decoyd Tier 1 detection
+# against examples/demo-evil-pkg (requires workflow_dispatch or explicit call).
+
+name: Decoyd Demo (Tier 1 npm Credential Access)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  decoyd-demo:
+    name: Decoyd Tier 1 credential-access demo
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: "stable"
+          cache: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "20"
+
+      - name: Build and install decoyd
+        run: |
+          go build -o /tmp/decoyd ./cmd/decoyd
+          sudo install -m 0755 /tmp/decoyd /usr/local/bin/decoyd
+
+      - name: Seed decoy credentials and deployed_tokens.json
+        run: |
+          DATA_DIR="$RUNNER_TEMP/decoyd-demo"
+          mkdir -p "$DATA_DIR"
+          echo "DATA_DIR=$DATA_DIR" >> "$GITHUB_ENV"
+
+          printf '//registry.npmjs.org/:_authToken=npm_%s\n' "$(openssl rand -hex 20)" > "$HOME/.npmrc"
+          chmod 0600 "$HOME/.npmrc"
+
+          printf '[distutils]\nindex-servers = pypi\n[pypi]\nusername = __token__\npassword = pypi-%s\n' "$(openssl rand -hex 20)" > "$HOME/.pypirc"
+          chmod 0600 "$HOME/.pypirc"
+
+          printf 'hvs.%s\n' "$(openssl rand -hex 20)" > "$HOME/.vault-token"
+          chmod 0600 "$HOME/.vault-token"
+
+          OWNER_UID="$(id -u)"
+          cat <<EOF > "$DATA_DIR/deployed_tokens.json"
+          [
+            {
+              "id": "demo-npmrc-tok1",
+              "type": "npmrc",
+              "deployed_path": "$HOME/.npmrc",
+              "owner_uid": $OWNER_UID
+            },
+            {
+              "id": "demo-pypirc-tok2",
+              "type": "pypirc",
+              "deployed_path": "$HOME/.pypirc",
+              "owner_uid": $OWNER_UID
+            },
+            {
+              "id": "demo-vault-tok3",
+              "type": "vault_token",
+              "deployed_path": "$HOME/.vault-token",
+              "owner_uid": $OWNER_UID
+            }
+          ]
+          EOF
+          chmod 0600 "$DATA_DIR/deployed_tokens.json"
+
+      - name: Start decoyd watch (Tier 1)
+        run: |
+          sudo -E sh -c 'exec /usr/local/bin/decoyd watch --tier1 --data-dir "$1" > /tmp/decoyd-demo-watch.log 2>&1' _ "$DATA_DIR" &
+          ready=0
+          for i in $(seq 1 30); do
+            if grep -q "decoyd watch started" /tmp/decoyd-demo-watch.log 2>/dev/null; then
+              ready=1
+              break
+            fi
+            sleep 0.5
+          done
+          cat /tmp/decoyd-demo-watch.log || true
+          test "$ready" -eq 1
+
+      - name: Install examples/demo-evil-pkg (triggers postinstall credential read)
+        run: |
+          mkdir -p "$RUNNER_TEMP/demo-pkg-install"
+          cd "$RUNNER_TEMP/demo-pkg-install"
+          npm install --no-save "$GITHUB_WORKSPACE/examples/demo-evil-pkg"
+
+      - name: Assert decoyd events --fail-if-any exits 3
+        run: |
+          found=0
+          for i in $(seq 1 20); do
+            if [ -s "$DATA_DIR/triggers.jsonl" ]; then
+              found=1
+              break
+            fi
+            sleep 0.5
+          done
+          test "$found" -eq 1
+
+          echo "=== decoyd events --json ==="
+          sudo /usr/local/bin/decoyd events --json --data-dir "$DATA_DIR" | tee "$RUNNER_TEMP/demo-events.json"
+
+          RESULT=0
+          sudo /usr/local/bin/decoyd events --fail-if-any --data-dir "$DATA_DIR" || RESULT=$?
+          echo "decoyd events --fail-if-any exit code: $RESULT"
+          if [ "$RESULT" -eq 3 ]; then
+            echo "SUCCESS: Decoyd Tier 1 detected credential access (exit 3)."
+            exit 0
+          fi
+          echo "FAIL: expected exit code 3, got $RESULT"
+          exit 1
+
+      - name: Upload demo events artifact
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: demo-events
+          path: |
+            ${{ runner.temp }}/demo-events.json
+            /tmp/decoyd-demo-watch.log
+          if-no-files-found: ignore
+
+      - name: Stop decoyd watcher
+        if: always()
+        run: |
+          sudo pkill -TERM -f '/usr/local/bin/decoyd watch --tier1' || true
+          cat /tmp/decoyd-demo-watch.log || true
