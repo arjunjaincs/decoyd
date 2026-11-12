@@ -4,8 +4,9 @@
 
 | Version | Supported |
 |---------|-----------|
-| `main` (HEAD) | ✅ |
-| Earlier | ❌ — upgrade to main |
+| `1.0.x` | ✅ |
+| `main` | ✅ |
+| `< 1.0` | ❌ — upgrade to `1.0.x` or `main` |
 
 ## Reporting a Vulnerability
 

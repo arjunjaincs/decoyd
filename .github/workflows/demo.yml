@@ -47,9 +47,8 @@ jobs:
           mkdir -p "$DATA_DIR"
           echo "DATA_DIR=$DATA_DIR" >> "$GITHUB_ENV"
 
-          printf '//registry.npmjs.org/:_authToken=npm_%s\n' "$(openssl rand -hex 20)" > "$HOME/.npmrc"
-          chmod 0600 "$HOME/.npmrc"
-
+          # Do not seed ~/.npmrc because npm itself reads ~/.npmrc on startup
+          # (even under --ignore-scripts); seed credential files read only by postinstall.
           printf '[distutils]\nindex-servers = pypi\n[pypi]\nusername = __token__\npassword = pypi-%s\n' "$(openssl rand -hex 20)" > "$HOME/.pypirc"
           chmod 0600 "$HOME/.pypirc"
 
@@ -59,12 +58,6 @@ jobs:
           OWNER_UID="$(id -u)"
           cat <<EOF > "$DATA_DIR/deployed_tokens.json"
           [
-            {
-              "id": "demo-npmrc-tok1",
-              "type": "npmrc",
-              "deployed_path": "$HOME/.npmrc",
-              "owner_uid": $OWNER_UID
-            },
             {
               "id": "demo-pypirc-tok2",
               "type": "pypirc",
@@ -94,6 +87,20 @@ jobs:
           done
           cat /tmp/decoyd-demo-watch.log || true
           test "$ready" -eq 1
+          grep -q "monitoring 2 tokens" /tmp/decoyd-demo-watch.log
+
+      - name: Negative control (npm install --ignore-scripts produces 0 events)
+        run: |
+          mkdir -p "$RUNNER_TEMP/demo-pkg-neg"
+          cd "$RUNNER_TEMP/demo-pkg-neg"
+          npm install --no-save --ignore-scripts "$GITHUB_WORKSPACE/examples/demo-evil-pkg"
+          sleep 2.6
+          if sudo test -s "$DATA_DIR/triggers.jsonl"; then
+            echo "ERROR: expected 0 events under --ignore-scripts, got:"
+            sudo cat "$DATA_DIR/triggers.jsonl"
+            exit 1
+          fi
+          echo "Negative control passed: 0 events under npm install --ignore-scripts."
 
       - name: Install examples/demo-evil-pkg (triggers postinstall credential read)
         run: |
@@ -101,20 +108,42 @@ jobs:
           cd "$RUNNER_TEMP/demo-pkg-install"
           npm install --no-save "$GITHUB_WORKSPACE/examples/demo-evil-pkg"
 
-      - name: Assert decoyd events --fail-if-any exits 3
+      - name: Assert attributed Tier 1 event and exit code 3
         run: |
           found=0
-          for i in $(seq 1 20); do
-            if sudo test -s "$DATA_DIR/triggers.jsonl"; then
+          for i in $(seq 1 50); do
+            if sudo test -f "$DATA_DIR/triggers.jsonl" && sudo grep -q "demo-evil-pkg" "$DATA_DIR/triggers.jsonl"; then
               found=1
               break
             fi
-            sleep 0.5
+            sleep 0.2
           done
           test "$found" -eq 1
 
           echo "=== decoyd events --json ==="
           sudo /usr/local/bin/decoyd events --json --data-dir "$DATA_DIR" | tee "$RUNNER_TEMP/demo-events.json"
+
+          python3 - "$RUNNER_TEMP/demo-events.json" <<'PY'
+          import json, sys
+
+          with open(sys.argv[1], "r", encoding="utf-8") as f:
+              events = json.load(f)
+
+          matched = []
+          for ev in events:
+              attr = ev.get("attribution") or {}
+              if (
+                  ev.get("watcher_tier") == "tier1"
+                  and attr.get("npm_package") == "demo-evil-pkg"
+                  and attr.get("npm_lifecycle_event") == "postinstall"
+              ):
+                  matched.append(ev)
+
+          assert matched, f"No Tier 1 event with npm_package=demo-evil-pkg and npm_lifecycle_event=postinstall in {events}"
+          best = [e for e in matched if (e.get("attribution") or {}).get("confidence") == 3]
+          assert best, f"Expected confidence == 3 attribution, got {matched}"
+          print("Matched Tier 1 event:", json.dumps(best[0], indent=2))
+          PY
 
           RESULT=0
           sudo /usr/local/bin/decoyd events --fail-if-any --data-dir "$DATA_DIR" || RESULT=$?

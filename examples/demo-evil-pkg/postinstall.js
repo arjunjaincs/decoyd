@@ -60,4 +60,8 @@ if (emu.status === 0) {
 }
 
 console.log();
-console.log('=== demo-evil-pkg: scan complete ===');
+// Hold the Node process open briefly (300 ms) so asynchronous Linux Tier 1
+// /proc attribution (exe, environ, ancestor chain) completes while live.
+setTimeout(() => {
+  console.log('=== demo-evil-pkg: scan complete ===');
+}, 300);
