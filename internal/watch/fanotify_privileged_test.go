@@ -52,8 +52,13 @@ func TestFanotify_Privileged_ChildCatReadsDecoy(t *testing.T) {
 	// Give poll loops a moment to enter Poll.
 	time.Sleep(150 * time.Millisecond)
 
-	// Child process `cat` reads the decoy with npm lifecycle env variables.
-	cmd := exec.Command("cat", decoyPath)
+	// Child process `cat` reads the decoy with npm lifecycle env variables, then waits on stdin ("-")
+	// until the async fanotify worker persists the attributed event so /proc/<pid>/environ stays readable.
+	cmd := exec.Command("cat", decoyPath, "-")
+	pw, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatalf("StdinPipe: %v", err)
+	}
 	cmd.Env = append(os.Environ(),
 		"npm_package_name=evil-test-pkg",
 		"npm_package_version=1.2.3",
@@ -62,12 +67,19 @@ func TestFanotify_Privileged_ChildCatReadsDecoy(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start cat: %v", err)
 	}
+	var waited bool
+	t.Cleanup(func() {
+		if !waited {
+			_ = pw.Close()
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+				_ = cmd.Wait()
+			}
+		}
+	})
 	childPID, ok := safeIntToInt32(cmd.Process.Pid)
 	if !ok {
 		t.Fatalf("child pid %d out of int32 range", cmd.Process.Pid)
-	}
-	if err := cmd.Wait(); err != nil {
-		t.Fatalf("wait cat: %v", err)
 	}
 
 	var matched *triglog.TriggerEvent
@@ -88,6 +100,14 @@ func TestFanotify_Privileged_ChildCatReadsDecoy(t *testing.T) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+
+	if err := pw.Close(); err != nil {
+		t.Fatalf("close cat stdin: %v", err)
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("wait cat: %v", err)
+	}
+	waited = true
 
 	if matched == nil {
 		t.Fatal("timed out waiting for tier1 trigger event from child cat")

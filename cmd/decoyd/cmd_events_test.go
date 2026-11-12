@@ -16,8 +16,12 @@ func TestParseGlobalFlags_DataDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseGlobalFlags: %v", err)
 	}
-	if !explicit || dir != filepath.Clean("/tmp/decoyd-test") {
-		t.Fatalf("got (%q, %v); want (%q, true)", dir, explicit, filepath.Clean("/tmp/decoyd-test"))
+	want1, err := filepath.Abs("/tmp/decoyd-test")
+	if err != nil {
+		t.Fatalf("filepath.Abs want1: %v", err)
+	}
+	if !explicit || dir != want1 {
+		t.Fatalf("got (%q, %v); want (%q, true)", dir, explicit, want1)
 	}
 	if len(rest) != 2 || rest[0] != "watch" || rest[1] != "--tier1" {
 		t.Fatalf("rest = %v; want [watch --tier1]", rest)
@@ -27,8 +31,12 @@ func TestParseGlobalFlags_DataDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseGlobalFlags = syntax: %v", err)
 	}
-	if !exp2 || dir2 != filepath.Clean("/tmp/d2") || len(rest2) != 2 {
-		t.Fatalf("got (%q, %v, %v)", dir2, exp2, rest2)
+	want2, err := filepath.Abs("/tmp/d2")
+	if err != nil {
+		t.Fatalf("filepath.Abs want2: %v", err)
+	}
+	if !exp2 || dir2 != want2 || len(rest2) != 2 {
+		t.Fatalf("got (%q, %v, %v); want (%q, true, len=2)", dir2, exp2, rest2, want2)
 	}
 
 	if _, _, _, err := parseGlobalFlags([]string{"watch", "--data-dir"}); err == nil {
