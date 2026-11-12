@@ -35,6 +35,7 @@ The `postinstall.js` script:
 1. Lists well-known credential file paths (`.npmrc`, `.pypirc`, `id_rsa`, etc.)
 2. Opens and reads each file found (reports file name + byte count only)
 3. Immediately discards the contents — **no data is stored or transmitted**
+4. Holds the Node process open for `300 ms` after reading (fixture behavior) so asynchronous Linux Tier 1 `/proc` attribution completes while the process is still live
 
 If `decoyd-emu` is on `$PATH`, the script delegates to it (performing the same
 read-only credential scan in a subprocess).
