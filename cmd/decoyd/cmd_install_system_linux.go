@@ -240,7 +240,7 @@ func copyFileAtomic(srcPath, dstPath string, mode os.FileMode) error {
 	if err != nil {
 		return err
 	}
-	defer src.Close()
+	defer func() { _ = src.Close() }()
 
 	dstDir := filepath.Dir(dstPath)
 	if err := os.MkdirAll(dstDir, 0o750); err != nil {
@@ -273,7 +273,7 @@ func installBinary(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer in.Close()
+	defer func() { _ = in.Close() }()
 
 	dir := filepath.Dir(dst)
 	if err := os.MkdirAll(dir, 0o755); err != nil { // #nosec G301 -- target binary parent dir (/usr/local/bin)

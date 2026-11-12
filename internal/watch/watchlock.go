@@ -109,10 +109,20 @@ func overwriteLock(path string, pid int) (func(), error) {
 	if err != nil {
 		return nil, fmt.Errorf("overwrite stale lock: %w", err)
 	}
-	defer f.Close()
+	closed := false
+	defer func() {
+		if !closed {
+			_ = f.Close()
+		}
+	}()
 	if err := writePID(f, pid); err != nil {
 		_ = os.Remove(path)
 		return nil, fmt.Errorf("write PID to stale lock: %w", err)
+	}
+	closed = true
+	if err := f.Close(); err != nil {
+		_ = os.Remove(path)
+		return nil, fmt.Errorf("close stale lock: %w", err)
 	}
 	return makeRelease(path), nil
 }

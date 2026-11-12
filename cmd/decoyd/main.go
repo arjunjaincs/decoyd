@@ -204,7 +204,7 @@ func run(args []string) error {
 		// store.Open returns a friendly 'already running' error on timeout.
 		return err
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 
 	// Dispatch store-dependent subcommands.
 	if len(args) > 0 {

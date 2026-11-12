@@ -59,13 +59,21 @@ func cmdInstall(dataDir string) error {
 	if err != nil {
 		return fmt.Errorf("write unit file: %w", err)
 	}
-	defer f.Close()
+	closed := false
+	defer func() {
+		if !closed {
+			_ = f.Close()
+		}
+	}()
 
 	tmpl := template.Must(template.New("unit").Parse(systemdUnitTemplate))
 	if err := tmpl.Execute(f, struct{ ExecPath string }{ExecPath: quoteExecStart(execPath)}); err != nil {
 		return fmt.Errorf("render unit: %w", err)
 	}
-	_ = f.Close()
+	closed = true
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close unit file: %w", err)
+	}
 
 	fmt.Println("unit file written:", unitPath)
 

@@ -71,7 +71,11 @@ func cmdDoctor(dataDir string, args []string) error {
 				Message: "database appears locked (another process may be running): " + dbErr.Error()})
 			return
 		}
-		st.Close()
+		if cerr := st.Close(); cerr != nil {
+			add(doctorResult{Check: "db_lock", Status: "warn",
+				Message: "database close error: " + cerr.Error()})
+			return
+		}
 		add(doctorResult{Check: "db_lock", Status: "ok", Message: "database not locked"})
 	}()
 

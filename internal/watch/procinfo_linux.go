@@ -214,7 +214,7 @@ func exeSHA256(pid int32, exePath string, procRoot string) string {
 	if err != nil {
 		return ""
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	const maxBytes = 100 * 1024 * 1024
 	h := sha256.New()
 	if _, err := io.Copy(h, io.LimitReader(f, maxBytes)); err != nil {

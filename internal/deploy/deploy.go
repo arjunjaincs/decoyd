@@ -207,10 +207,17 @@ func writeFile(dest, content string, perm os.FileMode) error {
 	if err != nil {
 		return fmt.Errorf("deploy: open %s: %w", dest, err)
 	}
-	defer f.Close()
+	closed := false
+	defer func() {
+		if !closed {
+			_ = f.Close()
+		}
+	}()
 
 	if _, err := io.WriteString(f, content); err != nil {
 		// Best-effort: remove the partially-written file to avoid a corrupt decoy.
+		_ = f.Close()
+		closed = true
 		_ = os.Remove(dest)
 		return fmt.Errorf("deploy: write %s: %w", dest, err)
 	}
@@ -220,6 +227,11 @@ func writeFile(dest, content string, perm os.FileMode) error {
 		// Non-fatal on platforms where Chmod via fd is unsupported;
 		// the perm passed to openExclNoFollow already set the umask-adjusted mode.
 		_ = err
+	}
+	closed = true
+	if err := f.Close(); err != nil {
+		_ = os.Remove(dest)
+		return fmt.Errorf("deploy: close %s: %w", dest, err)
 	}
 	return nil
 }

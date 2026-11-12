@@ -127,11 +127,20 @@ func Append(dataDir string, te TriggerEvent) error {
 	if err != nil {
 		return fmt.Errorf("triglog open: %w", err)
 	}
-	defer f.Close()
+	closed := false
+	defer func() {
+		if !closed {
+			_ = f.Close()
+		}
+	}()
 
 	data = append(data, '\n')
 	if _, err := f.Write(data); err != nil {
 		return fmt.Errorf("triglog write: %w", err)
+	}
+	closed = true
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("triglog close: %w", err)
 	}
 	return nil
 }
@@ -153,7 +162,7 @@ func Load(dataDir string) ([]TriggerEvent, error) {
 		}
 		return nil, fmt.Errorf("triglog open: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	// latest-record-per-ID deduplication map; preserves last occurrence.
 	seen := make(map[string]TriggerEvent)
@@ -249,7 +258,7 @@ func loadLocked(path string) ([]TriggerEvent, error) {
 		}
 		return nil, fmt.Errorf("triglog open: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	// Inline scan: same deduplication logic as Load.
 	seen := make(map[string]TriggerEvent)

@@ -212,7 +212,7 @@ func TestFanotifyWatcher_FD_Closed(t *testing.T) {
 	}
 	readFD := int32(pipefd[0])
 	writeFD := pipefd[1]
-	defer unix.Close(writeFD)
+	defer func() { _ = unix.Close(writeFD) }()
 
 	fw := &fanotifyWatcher{
 		fanFD:        -1,
@@ -341,7 +341,7 @@ func TestParseFanotifyBoundsAndOverflow(t *testing.T) {
 	if err := unix.Pipe(pipeFDs); err != nil {
 		t.Fatalf("pipe: %v", err)
 	}
-	defer unix.Close(pipeFDs[1])
+	defer func() { _ = unix.Close(pipeFDs[1]) }()
 	readFD := pipeFDs[0]
 	// Build event with valid readFD and overflowing PID (0x80000000).
 	buf := make([]byte, fanotifyMetadataSize)
@@ -426,15 +426,15 @@ func TestFanotifyWatcher_Overflow_SendsSanitizedRateLimitedAlert(t *testing.T) {
 	if err := unix.Pipe2(fanPipe[:], unix.O_CLOEXEC|unix.O_NONBLOCK); err != nil {
 		t.Fatalf("pipe2 fan: %v", err)
 	}
-	defer unix.Close(fanPipe[0])
-	defer unix.Close(fanPipe[1])
+	defer func() { _ = unix.Close(fanPipe[0]) }()
+	defer func() { _ = unix.Close(fanPipe[1]) }()
 
 	var stopPipe [2]int
 	if err := unix.Pipe2(stopPipe[:], unix.O_CLOEXEC|unix.O_NONBLOCK); err != nil {
 		t.Fatalf("pipe2 stop: %v", err)
 	}
-	defer unix.Close(stopPipe[0])
-	defer unix.Close(stopPipe[1])
+	defer func() { _ = unix.Close(stopPipe[0]) }()
+	defer func() { _ = unix.Close(stopPipe[1]) }()
 
 	ownPID, _ := safeIntToInt32(os.Getpid())
 	fw := &fanotifyWatcher{
