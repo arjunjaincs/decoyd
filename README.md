@@ -121,4 +121,4 @@ docs/                 ADR, EVENT-SCHEMA, ATTACK-MAPPING, BENCHMARKS, THREAT-MODE
 
 ## License
 
-Apache 2.0. See `LICENSE`.
+MIT — see [LICENSE](LICENSE).
