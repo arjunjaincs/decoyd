@@ -6,6 +6,12 @@ name: Decoyd Demo (Tier 1 npm Credential Access)
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - 'batch/**'
+    paths:
+      - '.github/workflows/demo.yml'
+      - 'examples/demo-evil-pkg/**'
 
 permissions:
   contents: read
@@ -99,7 +105,7 @@ jobs:
         run: |
           found=0
           for i in $(seq 1 20); do
-            if [ -s "$DATA_DIR/triggers.jsonl" ]; then
+            if sudo test -s "$DATA_DIR/triggers.jsonl"; then
               found=1
               break
             fi
