@@ -399,3 +399,396 @@ jobs:
         run: |
           sudo pkill -TERM -f '/tmp/decoyd watch --tier1' || true
           cat /tmp/decoyd-npm-watch.log || true
+
+  benchmarks:
+    name: Benchmarks (Tier 1 fanotify vs Tier 2 inotify)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: "stable"
+          cache: false
+
+      - name: Build decoyd
+        run: go build -o /tmp/decoyd ./cmd/decoyd
+
+      - name: Record host and runner metadata
+        run: |
+          {
+            echo "=== uname -a ==="
+            uname -a
+            echo "=== uname -r ==="
+            uname -r
+            echo "=== go version ==="
+            go version
+            echo "=== runner image env ==="
+            echo "ImageOS=${ImageOS:-unknown}"
+            echo "ImageVersion=${ImageVersion:-unknown}"
+            echo "=== /etc/os-release ==="
+            cat /etc/os-release
+            echo "=== lscpu | head -20 ==="
+            lscpu | head -20
+          } | tee "$RUNNER_TEMP/host_info.txt"
+
+      - name: Run Tier 2 and Tier 1 benchmarks
+        run: |
+          cat <<'PY' > "$RUNNER_TEMP/bench_suite.py"
+          import json
+          import os
+          import shutil
+          import signal
+          import statistics
+          import subprocess
+          import sys
+          import tempfile
+          import threading
+          import time
+          from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+          BIN = "/tmp/decoyd"
+
+          class OkHandler(BaseHTTPRequestHandler):
+              def do_POST(self):
+                  n = int(self.headers.get("Content-Length", "0") or "0")
+                  if n > 0:
+                      _ = self.rfile.read(n)
+                  self.send_response(200)
+                  self.end_headers()
+              def log_message(self, *args):
+                  return
+
+          def start_webhook():
+              srv = ThreadingHTTPServer(("127.0.0.1", 0), OkHandler)
+              t = threading.Thread(target=srv.serve_forever, daemon=True)
+              t.start()
+              return srv, f"http://127.0.0.1:{srv.server_port}/hook"
+
+          def write_alert_cfg(data_dir, hook_url):
+              cfg = {
+                  "channels": [{"id": "bench-hook", "type": "webhook", "webhook_url": hook_url}],
+                  "default_id": "bench-hook",
+              }
+              p = os.path.join(data_dir, "alert_config.json")
+              with open(p, "w", encoding="utf-8") as f:
+                  json.dump(cfg, f)
+              os.chmod(p, 0o600)
+
+          def seed_decoys(decoy_dir, data_dir, n, prefix):
+              os.makedirs(decoy_dir, exist_ok=True)
+              os.makedirs(data_dir, exist_ok=True)
+              uid = os.getuid()
+              tokens = []
+              for i in range(n):
+                  fp = os.path.join(decoy_dir, f"decoy_{i:04d}.txt")
+                  with open(fp, "w", encoding="utf-8") as f:
+                      f.write(f"tok_{i:04d}_placeholder_secret_line\n")
+                  os.chmod(fp, 0o600)
+                  tokens.append({
+                      "id": f"{prefix}-{i:04d}",
+                      "type": "env_secrets",
+                      "deployed_path": fp,
+                      "owner_uid": uid,
+                  })
+              snap = os.path.join(data_dir, "deployed_tokens.json")
+              with open(snap, "w", encoding="utf-8") as f:
+                  json.dump(tokens, f)
+              os.chmod(snap, 0o600)
+              return tokens
+
+          def start_watcher(data_dir, tier1, log_path):
+              args = [BIN, "watch", "--data-dir", data_dir]
+              if tier1:
+                  args = [BIN, "watch", "--tier1", "--data-dir", data_dir]
+              logf = open(log_path, "wb")
+              proc = subprocess.Popen(args, stdout=logf, stderr=subprocess.STDOUT)
+              deadline = time.monotonic() + 20.0
+              while time.monotonic() < deadline:
+                  if proc.poll() is not None:
+                      raise RuntimeError(f"watcher exited early ({proc.returncode}); check {log_path}")
+                  if os.path.exists(log_path):
+                      data = open(log_path, "r", encoding="utf-8", errors="replace").read()
+                      if "decoyd watch started" in data:
+                          time.sleep(0.25)
+                          return proc, logf, data
+                  time.sleep(0.1)
+              proc.kill()
+              raise RuntimeError(f"timed out waiting for decoyd watch startup ({log_path})")
+
+          def stop_watcher(proc, logf):
+              try:
+                  proc.send_signal(signal.SIGTERM)
+                  proc.wait(timeout=10)
+              except Exception:
+                  proc.kill()
+                  proc.wait(timeout=5)
+              logf.close()
+
+          def summarize(samples):
+              s = sorted(samples)
+              n = len(s)
+              assert n == 100, f"expected 100 samples, got {n}"
+              p50 = (s[49] + s[50]) / 2.0
+              p95_rank95 = s[94]
+              p95_rank96 = s[95]
+              return {
+                  "n": n,
+                  "min_ms": round(s[0], 3),
+                  "p50_ms": round(p50, 3),
+                  "mean_ms": round(statistics.fmean(s), 3),
+                  "p95_rank95_ms": round(p95_rank95, 3),
+                  "p95_rank96_ms": round(p95_rank96, 3),
+                  "max_ms": round(s[-1], 3),
+              }
+
+          def measure_latency_100(tier1, hook_url):
+              base = tempfile.mkdtemp(prefix="decoyd-lat-")
+              try:
+                  decoy_dir = os.path.join(base, "decoys")
+                  data_dir = os.path.join(base, "data")
+                  log_path = os.path.join(base, "watch.log")
+                  prefix = "t1" if tier1 else "t2"
+                  tokens = seed_decoys(decoy_dir, data_dir, 100, prefix)
+                  write_alert_cfg(data_dir, hook_url)
+                  proc, logf, startup = start_watcher(data_dir, tier1, log_path)
+                  trig_path = os.path.join(data_dir, "triggers.jsonl")
+                  pos = 0
+                  latencies = []
+                  tiers_seen = set()
+                  poll_interval = 0.0002 if tier1 else 0.0005
+                  for tok in tokens:
+                      rfd, wfd = os.pipe()
+                      pid = os.fork()
+                      if pid == 0:
+                          os.close(rfd)
+                          t0 = time.monotonic_ns()
+                          with open(tok["deployed_path"], "rb") as tf:
+                              _ = tf.read(64)
+                          os.write(wfd, f"{t0}\n".encode("ascii"))
+                          os.close(wfd)
+                          time.sleep(0.01)
+                          os._exit(0)
+                      os.close(wfd)
+                      raw_t0 = os.read(rfd, 64).decode("ascii").strip()
+                      os.close(rfd)
+                      t0_ns = int(raw_t0)
+
+                      deadline = time.monotonic() + 10.0
+                      found_ns = None
+                      buf = ""
+                      while time.monotonic() < deadline and found_ns is None:
+                          if os.path.exists(trig_path):
+                              with open(trig_path, "r", encoding="utf-8") as tf:
+                                  tf.seek(pos)
+                                  chunk = tf.read()
+                                  if chunk:
+                                      now_ns = time.monotonic_ns()
+                                      buf += chunk
+                                      pos += len(chunk.encode("utf-8"))
+                                      for line in buf.splitlines():
+                                          if not line.strip():
+                                              continue
+                                          ev = json.loads(line)
+                                          if ev.get("token_id") == tok["id"]:
+                                              found_ns = now_ns
+                                              tiers_seen.add(ev.get("watcher_tier", ""))
+                                              break
+                                      if "\n" in buf:
+                                          buf = "" if buf.endswith("\n") else buf.rsplit("\n", 1)[-1]
+                          if found_ns is None:
+                              time.sleep(poll_interval)
+                      os.waitpid(pid, 0)
+                      if found_ns is None:
+                          raise RuntimeError(f"timeout waiting for {tok['id']} in triggers.jsonl")
+                      latencies.append((found_ns - t0_ns) / 1e6)
+
+                  stop_watcher(proc, logf)
+                  res = summarize(latencies)
+                  res["tiers_seen"] = sorted(tiers_seen)
+                  res["startup"] = startup.strip()
+                  return res
+              finally:
+                  shutil.rmtree(base, ignore_errors=True)
+
+          def read_proc_ticks(pid):
+              with open(f"/proc/{pid}/stat", "r", encoding="utf-8") as f:
+                  line = f.read()
+              rest = line[line.rfind(")") + 2:].split()
+              return int(rest[11]) + int(rest[12])  # utime + stime
+
+          def read_vmrss_kib(pid):
+              with open(f"/proc/{pid}/status", "r", encoding="utf-8") as f:
+                  for line in f:
+                      if line.startswith("VmRSS:"):
+                          return int(line.split()[1])
+              return 0
+
+          def measure_idle_tier1(count, hook_url):
+              base = tempfile.mkdtemp(prefix=f"decoyd-idle-{count}-")
+              try:
+                  decoy_dir = os.path.join(base, "decoys")
+                  data_dir = os.path.join(base, "data")
+                  log_path = os.path.join(base, "watch.log")
+                  seed_decoys(decoy_dir, data_dir, count, f"idle{count}")
+                  write_alert_cfg(data_dir, hook_url)
+                  proc, logf, startup = start_watcher(data_dir, True, log_path)
+                  time.sleep(1.0)
+                  clk_tck = os.sysconf("SC_CLK_TCK")
+                  t0_ns = time.monotonic_ns()
+                  ticks0 = read_proc_ticks(proc.pid)
+                  rss_samples = [read_vmrss_kib(proc.pid)]
+                  for _ in range(30):
+                      time.sleep(1.0)
+                      rss_samples.append(read_vmrss_kib(proc.pid))
+                  t1_ns = time.monotonic_ns()
+                  ticks1 = read_proc_ticks(proc.pid)
+                  ps_out = subprocess.check_output(
+                      ["ps", "-o", "rss=,pcpu=", "-p", str(proc.pid)],
+                      text=True,
+                  ).strip()
+                  stop_watcher(proc, logf)
+                  wall_s = (t1_ns - t0_ns) / 1e9
+                  delta_ticks = ticks1 - ticks0
+                  cpu_pct = (delta_ticks / clk_tck) / wall_s * 100.0
+                  return {
+                      "decoys": count,
+                      "wall_s": round(wall_s, 3),
+                      "clk_tck": clk_tck,
+                      "rss_min_kib": min(rss_samples),
+                      "rss_avg_kib": round(statistics.fmean(rss_samples), 1),
+                      "rss_avg_mib": round(statistics.fmean(rss_samples) / 1024.0, 2),
+                      "rss_max_kib": max(rss_samples),
+                      "delta_ticks": delta_ticks,
+                      "cpu_pct": round(cpu_pct, 4),
+                      "ps_snapshot": ps_out,
+                      "startup": startup.strip(),
+                  }
+              finally:
+                  shutil.rmtree(base, ignore_errors=True)
+
+          def count_events(trig_path):
+              if not os.path.exists(trig_path):
+                  return 0
+              with open(trig_path, "r", encoding="utf-8") as f:
+                  return sum(1 for line in f if line.strip())
+
+          def measure_false_positives_tier1(hook_url):
+              base = tempfile.mkdtemp(prefix="decoyd-fp-")
+              try:
+                  repo = os.path.join(base, "repo")
+                  sib = os.path.join(base, "sibling")
+                  data_dir = os.path.join(base, "data")
+                  log_path = os.path.join(base, "watch.log")
+                  os.makedirs(os.path.join(repo, "src"), exist_ok=True)
+                  os.makedirs(os.path.join(repo, ".aws"), exist_ok=True)
+                  os.makedirs(sib, exist_ok=True)
+                  os.makedirs(data_dir, exist_ok=True)
+
+                  with open(os.path.join(repo, "src", "app.js"), "w", encoding="utf-8") as f:
+                      f.write("console.log('ok');\n")
+                  with open(os.path.join(sib, "notes.txt"), "w", encoding="utf-8") as f:
+                      f.write("API_TOKEN=non_decoy_sample\n")
+
+                  subprocess.run(["git", "-C", repo, "init", "-q"], check=True)
+                  subprocess.run(["git", "-C", repo, "config", "user.email", "ci@example.com"], check=True)
+                  subprocess.run(["git", "-C", repo, "config", "user.name", "CI"], check=True)
+                  subprocess.run(["git", "-C", repo, "add", "src/app.js"], check=True)
+                  subprocess.run(["git", "-C", repo, "commit", "-q", "-m", "init"], check=True)
+
+                  decoys = [
+                      ("fp-npmrc", "npmrc", os.path.join(repo, ".npmrc")),
+                      ("fp-env", "env_secrets", os.path.join(repo, ".env")),
+                      ("fp-aws", "aws_credentials", os.path.join(repo, ".aws", "credentials")),
+                  ]
+                  uid = os.getuid()
+                  snap_items = []
+                  for tid, ttype, dpath in decoys:
+                      with open(dpath, "w", encoding="utf-8") as f:
+                          f.write("SECRET_VALUE=dummy\n")
+                      os.chmod(dpath, 0o600)
+                      snap_items.append({"id": tid, "type": ttype, "deployed_path": dpath, "owner_uid": uid})
+                  with open(os.path.join(data_dir, "deployed_tokens.json"), "w", encoding="utf-8") as f:
+                      json.dump(snap_items, f)
+                  write_alert_cfg(data_dir, hook_url)
+
+                  proc, logf, _ = start_watcher(data_dir, True, log_path)
+                  trig_path = os.path.join(data_dir, "triggers.jsonl")
+
+                  def run_op(name, fn):
+                      before = count_events(trig_path)
+                      fn()
+                      time.sleep(2.6)
+                      after = count_events(trig_path)
+                      return {"operation": name, "events_delta": after - before}
+
+                  def editor_stat_loop():
+                      for p in [os.path.join(repo, ".npmrc"), os.path.join(repo, ".env")]:
+                          for _ in range(50):
+                              os.lstat(p)
+                              os.stat(p)
+                              time.sleep(0.01)
+
+                  results = [
+                      run_op("ls -la <tree>", lambda: subprocess.run(["ls", "-la", repo], check=True, stdout=subprocess.DEVNULL)),
+                      run_op("stat <decoy> (.npmrc, .env)", lambda: subprocess.run(["stat", os.path.join(repo, ".npmrc"), os.path.join(repo, ".env")], check=True, stdout=subprocess.DEVNULL)),
+                      run_op("find <tree> -maxdepth 3", lambda: subprocess.run(["find", repo, "-maxdepth", "3"], check=True, stdout=subprocess.DEVNULL)),
+                      run_op("git status (in repo with decoys)", lambda: subprocess.run(["git", "-C", repo, "status"], check=True, stdout=subprocess.DEVNULL)),
+                      run_op("grep -rn API_TOKEN <sibling-dir>", lambda: subprocess.run(["grep", "-rn", "API_TOKEN", sib], check=True, stdout=subprocess.DEVNULL)),
+                      run_op("editor-style lstat/stat loop (50x, 10ms)", editor_stat_loop),
+                      run_op("positive control: cat <decoy>", lambda: subprocess.run(["cat", os.path.join(repo, ".env")], check=True, stdout=subprocess.DEVNULL)),
+                  ]
+                  stop_watcher(proc, logf)
+                  for r in results[:-1]:
+                      assert r["events_delta"] == 0, f"Unexpected false positive in {r}"
+                  assert results[-1]["events_delta"] >= 1, f"Positive control failed: {results[-1]}"
+                  return results
+              finally:
+                  shutil.rmtree(base, ignore_errors=True)
+
+          def main():
+              mode = sys.argv[1]
+              out_path = sys.argv[2]
+              srv, hook_url = start_webhook()
+              try:
+                  if mode == "tier2":
+                      assert os.geteuid() != 0, "tier2 must run unprivileged"
+                      res = {"tier2_latency_100": measure_latency_100(False, hook_url)}
+                  elif mode == "tier1":
+                      assert os.geteuid() == 0, "tier1 requires root"
+                      res = {
+                          "tier1_latency_100": measure_latency_100(True, hook_url),
+                          "tier1_idle": [measure_idle_tier1(n, hook_url) for n in (1, 100, 1000)],
+                          "tier1_false_positives": measure_false_positives_tier1(hook_url),
+                      }
+                  else:
+                      raise SystemExit(f"unknown mode {mode}")
+              finally:
+                  srv.shutdown()
+              with open(out_path, "w", encoding="utf-8") as f:
+                  json.dump(res, f, indent=2)
+              print(f"=== {mode} results ===")
+              print(json.dumps(res, indent=2))
+
+          if __name__ == "__main__":
+              main()
+          PY
+
+          python3 -m py_compile "$RUNNER_TEMP/bench_suite.py"
+          python3 "$RUNNER_TEMP/bench_suite.py" tier2 "$RUNNER_TEMP/bench_t2.json"
+          sudo sh -c 'ulimit -n 65536; exec "$@"' _ python3 "$RUNNER_TEMP/bench_suite.py" tier1 "$RUNNER_TEMP/bench_t1.json"
+          sudo chown "$(id -u):$(id -g)" "$RUNNER_TEMP/bench_t1.json"
+
+      - name: Upload benchmark results artifact
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tier1-benchmarks
+          path: |
+            ${{ runner.temp }}/host_info.txt
+            ${{ runner.temp }}/bench_t1.json
+            ${{ runner.temp }}/bench_t2.json
+          if-no-files-found: ignore
