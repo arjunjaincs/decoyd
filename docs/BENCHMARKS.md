@@ -24,9 +24,9 @@ host environment listed in its section and stored as an immutable artifact (CI r
 
 ---
 
-## (a) Time-to-Alert Over 100 Runs (Child Read -> Event Recorded / Delivered)
+## (a) Detection Latency Over 100 Runs (Child Read -> Event Recorded in `triggers.jsonl`)
 
-### CI Runner Apples-to-Apples (`Environment A`: Child Read -> `triggers.jsonl`) [RAN]
+### CI Runner Apples-to-Apples (`Environment A`: Child Read -> Event Recorded in `triggers.jsonl`) [RAN]
 
 **Measurement method** (`bench_suite.py`, CI run [`43161750870`](https://github.com/arjunjaincs/decoyd/actions/runs/43161750870)):
 100 distinct deployed decoy files are monitored by compiled `decoyd watch --tier1`
@@ -107,7 +107,7 @@ delta (Tier 1 in `Environment A`) or webhook receipts (Tier 2 in `Environment B`
 | `git status` (in repo with decoys) | 0 | No false positive |
 | `grep -rn API_TOKEN <sibling-dir>` | 0 | No false positive |
 | Editor-style `lstat`/`stat` loop (`50x`, `10 ms` interval) | 0 | No false positive |
-| Positive control: `cat <decoy>` (`.env`) | 2 (`pending` + `sent`) | Expected trigger (1 alert delivered) |
+| Positive control: `cat <decoy>` (`.env`) | 2 (`pending` + `sent`) | Expected trigger (2 lines recorded in `triggers.jsonl`: `pending` + `sent`) |
 
 ### Tier 2 (`inotify`, `2s` Debounce, `Environment B` WSL2) [RAN]
 

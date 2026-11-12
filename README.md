@@ -40,6 +40,8 @@ decoyd events --fail-if-any   # exit 3 if anything was caught (use in CI)
 | Windows read-only open detection | N/A | ❌ (write/rename/delete only on Windows) |
 
 > **Package-manager attribution scope:** Tier 1 package attribution reads only npm lifecycle environment variables (`npm_package_name`, `npm_package_version`, `npm_lifecycle_event`) from `/proc/<pid>/environ`. `pnpm` and `yarn` are untested, and `pip` is not supported.
+>
+> **Detection latency (event recorded in `triggers.jsonl`):** In [CI benchmarks](docs/BENCHMARKS.md), time from a child process reading a decoy file to the event recorded in `triggers.jsonl` over 100 runs was `7.677 ms` p50 (`8.526`–`8.577 ms` p95) for Tier 1 `fanotify` and `2003.355 ms` p50 (`2004.653`–`2004.684 ms` p95) for Tier 2 `inotify` (2 s per-path debounce).
 
 ---
 
@@ -54,7 +56,7 @@ decoyd events --fail-if-any   # exit 3 if anything was caught (use in CI)
 | `.slack_token` | `slack_token` | Slack bot token (`xoxb-...`) |
 | `config` | `kubeconfig` | Kubeconfig YAML with random cluster/user + bearer token |
 | `backup.sql` | `db_dump` | SQL dump header, schema, fake rows |
-| `token.txt` | `dns_canary` | Unique subdomain label |
+| `token.txt` | `dns_canary` | Unique subdomain label (experimental: no listener, needs external DNS logs) |
 | `.npmrc` | `npmrc` | npm access token (`npm_...`; plausible, not verified against official specs) |
 | `.pypirc` | `pypirc` | PyPI API token (`pypi-...`; plausible, not verified against official specs) |
 | `config.json` | `docker_config` | Docker registry base64 auth JSON |
