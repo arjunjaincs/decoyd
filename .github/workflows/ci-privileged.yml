@@ -458,7 +458,7 @@ jobs:
           import tempfile
           import threading
           import time
-          from http.server import BaseHTTPRequestHandler, ThreadingHTTPServe
+          from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
           BIN = "/tmp/decoyd"
 
